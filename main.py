@@ -1,139 +1,130 @@
 from fastapi import FastAPI, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from passlib.context import CryptContext
 from pydantic import BaseModel
-from typing import Dict
-import uvicorn
+from typing import Optional
+from passlib.hash import bcrypt
+import uuid
 
 app = FastAPI()
 
-# Middleware
+# Allow CORS from frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your Vercel frontend URL for better security
+    allow_origins=["https://jipate-bonus-v1-bcti.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# In-memory databases
+users_db = {}
+investments_db = {}
 
-# In-memory "databases"
-users: Dict[str, dict] = {}
-investments: Dict[str, dict] = {}
-
-# Add default admin
+# Admin user setup
 admin_username = "admin"
-admin_password = "admin123"
-users[admin_username] = {
+admin_password = "admin123"  # Change this securely
+users_db[admin_username] = {
     "username": admin_username,
-    "phone": "",
-    "password_hash": pwd_context.hash(admin_password),
-    "approved": True,
+    "password_hash": bcrypt.hash(admin_password),
+    "number": None,
+    "balance": 0,
     "referral": None,
-    "balance": 0
+    "approved": True
 }
 
+# Dependency to get user
+def get_user(username: str):
+    user = users_db.get(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
 
-# Registration
+
 @app.post("/register")
-async def register(
+def register_user(
     username: str = Form(...),
-    phone: str = Form(...),
+    number: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
-    referral: str = Form(None)
+    referral: Optional[str] = Form(None)
 ):
-    if username in users:
+    if username in users_db:
         raise HTTPException(status_code=400, detail="Username already exists")
     if password != confirm_password:
         raise HTTPException(status_code=400, detail="Passwords do not match")
 
-    users[username] = {
+    users_db[username] = {
         "username": username,
-        "phone": phone,
-        "password_hash": pwd_context.hash(password),
+        "number": number,
+        "password_hash": bcrypt.hash(password),
         "referral": referral,
-        "approved": False,
-        "balance": 0
+        "balance": 0,
+        "approved": True
     }
-    return {"message": "User registered successfully. Awaiting admin approval."}
+
+    return {"message": "User registered successfully"}
 
 
-# Login
 @app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
-    user = users.get(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    if not pwd_context.verify(password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect password")
-    if not user["approved"]:
-        raise HTTPException(status_code=403, detail="User not approved yet")
+def login_user(username: str = Form(...), password: str = Form(...)):
+    user = users_db.get(username)
+    if not user or not bcrypt.verify(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     return {"message": "Login successful"}
 
 
-# Approve user (Admin only)
-@app.post("/admin/approve_user")
-async def approve_user(admin: str = Form(...), admin_pass: str = Form(...), user_to_approve: str = Form(...)):
-    admin_user = users.get(admin)
-    if not admin_user or not pwd_context.verify(admin_pass, admin_user["password_hash"]):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    if user_to_approve not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    users[user_to_approve]["approved"] = True
-    return {"message": f"{user_to_approve} approved successfully"}
+@app.post("/invest")
+def invest(username: str = Form(...), amount: float = Form(...)):
+    user = get_user(username)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid amount")
+
+    investments_db[username] = {
+        "amount": amount
+    }
+    user["balance"] += amount * 2  # e.g. double investment
+
+    return {"message": f"Investment of {amount} successful"}
 
 
-# View users (Admin only)
-@app.get("/admin/view_users")
-async def view_users(admin: str = Form(...), admin_pass: str = Form(...)):
-    if not users.get(admin) or not pwd_context.verify(admin_pass, users[admin]["password_hash"]):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    return users
-
-
-# Withdraw endpoint
 @app.post("/withdraw")
-async def withdraw(username: str = Form(...), amount: float = Form(...)):
-    user = users.get(username)
-    investment = investments.get(username)
+def withdraw(username: str = Form(...), amount: float = Form(...)):
+    user = get_user(username)
+    investment = investments_db.get(username)
 
-    if not user or not investment:
-        raise HTTPException(status_code=404, detail="User or investment not found")
-    if not user["approved"]:
-        raise HTTPException(status_code=403, detail="User not approved")
-    if amount <= 0 or amount > user["balance"]:
-        raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+    if not investment:
+        raise HTTPException(status_code=400, detail="No investment found")
 
     invested = investment["amount"]
-    max_limit = 0
-    if invested >= 500 and invested < 1000:
-        max_limit = 150
-    elif invested >= 1000 and invested < 1500:
-        max_limit = 300
-    elif invested >= 1500:
-        max_limit = int(invested * 0.3)
+    balance = user["balance"]
 
-    if amount > max_limit:
-        raise HTTPException(status_code=400, detail=f"Withdrawal limit exceeded. Limit: {max_limit}")
+    limit = 0
+    if invested >= 500 and invested < 1000:
+        limit = 150
+    elif invested >= 1000 and invested < 1500:
+        limit = 300
+    elif invested >= 1500:
+        limit = int(invested * 0.3)
+
+    if amount > balance:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    if amount > limit:
+        raise HTTPException(status_code=400, detail=f"Withdrawal limit is KES {limit}")
 
     user["balance"] -= amount
-    return {"message": "Withdrawal successful"}
+
+    return {"message": f"Withdrawal of {amount} successful"}
 
 
-# Add investment
-@app.post("/invest")
-async def invest(username: str = Form(...), amount: float = Form(...)):
-    if username not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Invalid investment amount")
-    investments[username] = {"amount": amount}
-    users[username]["balance"] += amount
-    return {"message": f"Investment of {amount} added"}
+@app.get("/admin/view_users")
+def admin_view_users(username: str = "", password: str = ""):
+    if username != admin_username or not bcrypt.verify(password, users_db[admin_username]["password_hash"]):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return users_db
 
 
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=10000)
+@app.get("/admin/view_investments")
+def admin_view_investments(username: str = "", password: str = ""):
+    if username != admin_username or not bcrypt.verify(password, users_db[admin_username]["password_hash"]):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return investments_db
