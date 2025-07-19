@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException, Form
+from fastapi import FastAPI, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from passlib.context import CryptContext
 from pydantic import BaseModel
-from typing import Dict
+from passlib.context import CryptContext
+from typing import Optional, Dict
+import uvicorn
 
 app = FastAPI()
 
-# CORS for Vercel frontend
+# CORS config to allow frontend (Vercel)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://jipate-bonus-v1-bcti.vercel.app"],
@@ -15,73 +16,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# In-memory stores
-users: Dict[str, dict] = {}
-investments: Dict[str, dict] = {}
-withdrawals: Dict[str, list] = {}
+# In-memory data storage (use DB for production)
+users_db: Dict[str, dict] = {}
+investments_db: Dict[str, dict] = {}
+withdrawals_db: Dict[str, dict] = {}
 
+# Models
 class User(BaseModel):
     username: str
-    password_hash: str
-    approved: bool = False
-    referral: str = None
-    balance: float = 0.0
+    password: str
+    number: str
+    referral: Optional[str] = None
 
-class Investment(BaseModel):
+class Login(BaseModel):
     username: str
-    amount: float
+    password: str
 
+# Register endpoint
 @app.post("/register")
-def register(username: str = Form(...), password: str = Form(...), referral: str = Form(None)):
-    if username in users:
-        raise HTTPException(status_code=400, detail="User already exists")
-    password_hash = pwd_context.hash(password)
-    users[username] = User(
-        username=username,
-        password_hash=password_hash,
-        approved=True,
-        referral=referral
-    ).dict()
+def register(
+    username: str = Form(...),
+    password: str = Form(...),
+    number: str = Form(...),
+    referral: Optional[str] = Form(None),
+):
+    if username in users_db:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    hashed_pw = pwd_context.hash(password)
+    users_db[username] = {
+        "username": username,
+        "password_hash": hashed_pw,
+        "approved": True,
+        "referral": referral,
+        "balance": 0,
+        "number": number,
+    }
     return {"message": "User registered successfully"}
 
+# Login endpoint
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
-    user = users.get(username)
-    if not user or not pwd_context.verify(password, user['password_hash']):
+    user = users_db.get(username)
+    if not user or not pwd_context.verify(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    return {"message": "Login successful", "user": username}
+    return {"message": f"Welcome, {username}!"}
 
-@app.post("/invest")
-def invest(username: str = Form(...), amount: float = Form(...)):
-    if username not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    if username in investments:
-        raise HTTPException(status_code=400, detail="Already invested")
-    investments[username] = {"username": username, "amount": amount}
-    users[username]['balance'] += amount * 0.3  # 30% daily earnings for demo
-    return {"message": "Investment successful"}
-
-@app.post("/withdraw")
-def withdraw(username: str = Form(...), amount: float = Form(...)):
-    if username not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    if users[username]['balance'] < amount:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    users[username]['balance'] -= amount
-    withdrawals.setdefault(username, []).append(amount)
-    return {"message": "Withdrawal successful, will be processed"}
-
-# Admin endpoints
+# View users (admin only)
 @app.get("/admin/view_users")
 def view_users():
-    return users
+    return users_db
 
+# View investments
 @app.get("/admin/view_investments")
 def view_investments():
-    return investments
+    return investments_db
 
-# Create default admin
-admin_password = pwd_context.hash("Admin12345!")
-users["admin"] = User(username="admin", password_hash=admin_password, approved=True).dict()
+# Invest endpoint
+@app.post("/invest")
+def invest(username: str = Form(...), amount: float = Form(...)):
+    if username not in users_db:
+        raise HTTPException(status_code=404, detail="User not found")
+    investments_db[username] = {"amount": amount}
+    users_db[username]["balance"] += amount
+    return {"message": "Investment successful"}
+
+# Withdraw endpoint
+@app.post("/withdraw")
+def withdraw(username: str = Form(...), amount: float = Form(...)):
+    if username not in users_db:
+        raise HTTPException(status_code=404, detail="User not found")
+    invested = investments_db.get(username, {}).get("amount", 0)
+    balance = users_db[username]["balance"]
+
+    # Calculate limits
+    if invested >= 1500:
+        max_withdraw = int(invested * 0.3)
+    elif invested >= 1000:
+        max_withdraw = 300
+    elif invested >= 500:
+        max_withdraw = 150
+    else:
+        max_withdraw = 0
+
+    if amount > max_withdraw:
+        raise HTTPException(status_code=400, detail=f"Limit is KES {max_withdraw}")
+    if amount > balance:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+
+    users_db[username]["balance"] -= amount
+    withdrawals_db.setdefault(username, []).append(amount)
+    return {"message": "Withdrawal request submitted"}
+
+# Root check
+@app.get("/")
+def root():
+    return {"message": "Jipate Bonus API"}
