@@ -24,6 +24,17 @@ users_db: Dict[str, dict] = {}
 investments_db: Dict[str, dict] = {}
 withdrawals_db: Dict[str, dict] = {}
 
+# 🔐 Preload admin user with known password (admin123)
+admin_password = "admin123"
+users_db["admin"] = {
+    "username": "admin",
+    "password_hash": pwd_context.hash(admin_password),
+    "approved": True,
+    "referral": None,
+    "balance": 0,
+    "number": "0000000000",  # placeholder
+}
+
 # Models
 class User(BaseModel):
     username: str
