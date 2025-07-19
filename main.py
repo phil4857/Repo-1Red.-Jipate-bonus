@@ -1,16 +1,28 @@
 from fastapi import FastAPI, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict
 import hashlib
 import time
 
 app = FastAPI()
 
+# CORS middleware: Allow Vercel frontend to call this backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://jipate-bonus-v1-bcti.vercel.app"],  # Your Vercel frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory databases
 users: Dict[str, dict] = {}
 investments: Dict[str, dict] = {}
 login_attempts: Dict[str, int] = {}
 
+# Models
 class User(BaseModel):
     username: str
     password_hash: str
@@ -28,13 +40,16 @@ class Investment(BaseModel):
     approved: bool = False
     timestamp: datetime
 
+# Root endpoint
 @app.get("/")
 def root():
     return {"message": "Welcome to Jipate Bonus Investment Platform"}
 
+# Password hashing utility
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+# Registration endpoint
 @app.post("/register")
 def register(username: str = Form(...), password: str = Form(...), referral: str = Form(None)):
     if username in users:
@@ -46,6 +61,7 @@ def register(username: str = Form(...), password: str = Form(...), referral: str
         users[referral]["referred_users"].append(username)
     return {"message": "User registered successfully"}
 
+# Login endpoint with lockout on 3 failed attempts
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     if username not in users:
@@ -61,6 +77,7 @@ def login(username: str = Form(...), password: str = Form(...)):
     login_attempts[username] = 0
     return {"message": f"Login successful for {username}"}
 
+# Investment endpoint
 @app.post("/invest")
 def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
     if username not in users:
@@ -70,7 +87,7 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
     if username in investments:
         raise HTTPException(status_code=400, detail="Duplicate investment already exists")
     if datetime.utcnow().strftime("%A") == "Sunday":
-        amount *= 0.95
+        amount *= 0.95  # 5% discount
     investment = Investment(
         username=username,
         amount=amount,
@@ -83,6 +100,7 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
         "note": "Send payment to MPESA number 0737734533"
     }
 
+# Admin approves user
 @app.post("/admin/approve_user")
 def approve_user(username: str = Form(...)):
     if username not in users:
@@ -90,6 +108,7 @@ def approve_user(username: str = Form(...)):
     users[username]["approved"] = True
     return {"message": f"{username} approved"}
 
+# Admin resets password
 @app.post("/admin/reset_password")
 def reset_password(username: str = Form(...), new_password: str = Form(...)):
     if username not in users:
@@ -98,6 +117,7 @@ def reset_password(username: str = Form(...), new_password: str = Form(...)):
     login_attempts[username] = 0
     return {"message": "Password reset"}
 
+# Admin approves investment
 @app.post("/admin/approve_investment")
 def approve_investment(username: str = Form(...)):
     if username not in investments:
@@ -112,6 +132,7 @@ def approve_investment(username: str = Form(...)):
         users[referrer]["balance"] += amount * 0.05
     return {"message": f"Investment approved for {username}"}
 
+# Daily earnings distribution every 24 hours
 @app.post("/earnings/daily")
 def daily_earnings():
     count = 0
@@ -125,6 +146,7 @@ def daily_earnings():
             count += 1
     return {"message": f"Daily earnings added for {count} users"}
 
+# Withdrawal
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     if username not in users:
@@ -134,10 +156,13 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     users[username]["balance"] -= amount
     return {"message": f"{amount} withdrawn by {username}. Await confirmation via MPESA."}
 
+# View users
 @app.get("/admin/view_users")
 def view_users():
     return users
 
+# View investments
 @app.get("/admin/view_investments")
 def view_investments():
     return investments
+
