@@ -1,13 +1,11 @@
-from fastapi import FastAPI, Form, HTTPException, Depends
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-from passlib.hash import bcrypt
-import uuid
+import bcrypt
 
 app = FastAPI()
 
-# Allow CORS from frontend
+# CORS settings for frontend hosted on Vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://jipate-bonus-v1-bcti.vercel.app"],
@@ -16,115 +14,92 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory databases
-users_db = {}
-investments_db = {}
-
-# Admin user setup
-admin_username = "admin"
-admin_password = "admin123"  # Change this securely
-users_db[admin_username] = {
-    "username": admin_username,
-    "password_hash": bcrypt.hash(admin_password),
-    "number": None,
-    "balance": 0,
-    "referral": None,
-    "approved": True
+# Simulated database
+users = {
+    "admin": {
+        "username": "admin",
+        "password_hash": bcrypt.hashpw("adminpass".encode(), bcrypt.gensalt()).decode(),
+        "approved": True,
+        "balance": 0,
+        "referral": None,
+        "phone": "0700000000"
+    }
 }
 
-# Dependency to get user
-def get_user(username: str):
-    user = users_db.get(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+investments = {}
 
-
+# User registration
 @app.post("/register")
 def register_user(
     username: str = Form(...),
-    number: str = Form(...),
     password: str = Form(...),
     confirm_password: str = Form(...),
-    referral: Optional[str] = Form(None)
+    phone: str = Form(...),
+    referral: str = Form(None)
 ):
-    if username in users_db:
-        raise HTTPException(status_code=400, detail="Username already exists")
+    if username in users:
+        raise HTTPException(status_code=400, detail="User already exists.")
     if password != confirm_password:
-        raise HTTPException(status_code=400, detail="Passwords do not match")
-
-    users_db[username] = {
+        raise HTTPException(status_code=400, detail="Passwords do not match.")
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    users[username] = {
         "username": username,
-        "number": number,
-        "password_hash": bcrypt.hash(password),
+        "password_hash": hashed,
+        "approved": False,
         "referral": referral,
         "balance": 0,
-        "approved": True
+        "phone": phone
     }
+    return {"message": "User registered successfully. Awaiting approval."}
 
-    return {"message": "User registered successfully"}
-
-
+# User login
 @app.post("/login")
 def login_user(username: str = Form(...), password: str = Form(...)):
-    user = users_db.get(username)
-    if not user or not bcrypt.verify(password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    return {"message": "Login successful"}
+    user = users.get(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+    if not user["approved"]:
+        raise HTTPException(status_code=403, detail="Account not approved.")
+    return {"message": "Login successful."}
 
-
-@app.post("/invest")
-def invest(username: str = Form(...), amount: float = Form(...)):
-    user = get_user(username)
-    if amount <= 0:
-        raise HTTPException(status_code=400, detail="Invalid amount")
-
-    investments_db[username] = {
-        "amount": amount
-    }
-    user["balance"] += amount * 2  # e.g. double investment
-
-    return {"message": f"Investment of {amount} successful"}
-
-
-@app.post("/withdraw")
-def withdraw(username: str = Form(...), amount: float = Form(...)):
-    user = get_user(username)
-    investment = investments_db.get(username)
-
-    if not investment:
-        raise HTTPException(status_code=400, detail="No investment found")
-
-    invested = investment["amount"]
-    balance = user["balance"]
-
-    limit = 0
-    if invested >= 500 and invested < 1000:
-        limit = 150
-    elif invested >= 1000 and invested < 1500:
-        limit = 300
-    elif invested >= 1500:
-        limit = int(invested * 0.3)
-
-    if amount > balance:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    if amount > limit:
-        raise HTTPException(status_code=400, detail=f"Withdrawal limit is KES {limit}")
-
-    user["balance"] -= amount
-
-    return {"message": f"Withdrawal of {amount} successful"}
-
-
+# Admin - view all users
 @app.get("/admin/view_users")
-def admin_view_users(username: str = "", password: str = ""):
-    if username != admin_username or not bcrypt.verify(password, users_db[admin_username]["password_hash"]):
-        raise HTTPException(status_code=403, detail="Access denied")
-    return users_db
+def view_users():
+    return users
 
+# Investment
+@app.post("/invest")
+def invest(username: str = Form(...), amount: int = Form(...)):
+    if username not in users or not users[username]["approved"]:
+        raise HTTPException(status_code=400, detail="User not found or not approved.")
+    investments[username] = {"amount": amount}
+    users[username]["balance"] += amount * 2  # simulate earnings
+    return {"message": "Investment recorded."}
 
-@app.get("/admin/view_investments")
-def admin_view_investments(username: str = "", password: str = ""):
-    if username != admin_username or not bcrypt.verify(password, users_db[admin_username]["password_hash"]):
-        raise HTTPException(status_code=403, detail="Access denied")
-    return investments_db
+# Withdraw
+@app.post("/withdraw")
+def withdraw(username: str = Form(...), amount: int = Form(...)):
+    user = users.get(username)
+    if not user or username not in investments:
+        raise HTTPException(status_code=400, detail="Account or investment not found.")
+    invested = investments[username]["amount"]
+    if invested < 500:
+        raise HTTPException(status_code=400, detail="Minimum investment is 500.")
+
+    if invested >= 1500:
+        max_limit = int(invested * 0.3)
+    elif invested >= 1000:
+        max_limit = 300
+    else:
+        max_limit = 150
+
+    if amount > max_limit:
+        raise HTTPException(status_code=400, detail=f"Your withdrawal limit is {max_limit}")
+
+    if amount > user["balance"]:
+        raise HTTPException(status_code=400, detail="Insufficient balance.")
+    
+    user["balance"] -= amount
+    return {"message": "Withdrawal request received."}
