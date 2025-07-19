@@ -1,16 +1,12 @@
-from fastapi import FastAPI, HTTPException, Form, Depends
+from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from passlib.context import CryptContext
+from pydantic import BaseModel
 from typing import Dict
-import time
 
 app = FastAPI()
 
-# Password hashing setup
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# CORS settings
+# CORS for Vercel frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://jipate-bonus-v1-bcti.vercel.app"],
@@ -19,103 +15,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage (use a database in production)
-users: Dict[str, Dict] = {}
-investments: Dict[str, Dict] = {}
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# In-memory stores
+users: Dict[str, dict] = {}
+investments: Dict[str, dict] = {}
 withdrawals: Dict[str, list] = {}
-failed_attempts: Dict[str, Dict[str, int]] = {}
 
-# Models
-class RegisterForm(BaseModel):
+class User(BaseModel):
     username: str
-    password: str
+    password_hash: str
+    approved: bool = False
+    referral: str = None
+    balance: float = 0.0
 
-# Helpers
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+class Investment(BaseModel):
+    username: str
+    amount: float
 
-def verify_password(plain_password, hashed_password) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-def block_login(username: str) -> bool:
-    attempt = failed_attempts.get(username, {"count": 0, "last_try": 0})
-    if attempt["count"] >= 3 and time.time() - attempt["last_try"] < 3600:
-        return True
-    return False
-
-def record_failed_attempt(username: str):
-    now = time.time()
-    attempt = failed_attempts.get(username, {"count": 0, "last_try": now})
-    if now - attempt["last_try"] > 3600:
-        attempt = {"count": 1, "last_try": now}
-    else:
-        attempt["count"] += 1
-        attempt["last_try"] = now
-    failed_attempts[username] = attempt
-
-def reset_failed_attempts(username: str):
-    if username in failed_attempts:
-        del failed_attempts[username]
-
-# Routes
 @app.post("/register")
-def register(username: str = Form(...), password: str = Form(...)):
+def register(username: str = Form(...), password: str = Form(...), referral: str = Form(None)):
     if username in users:
         raise HTTPException(status_code=400, detail="User already exists")
-    users[username] = {
-        "password": hash_password(password),
-        "balance": 0,
-        "referral": None,
-        "joined": time.time(),
-    }
+    password_hash = pwd_context.hash(password)
+    users[username] = User(
+        username=username,
+        password_hash=password_hash,
+        approved=True,
+        referral=referral
+    ).dict()
     return {"message": "User registered successfully"}
 
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
-    if block_login(username):
-        raise HTTPException(status_code=403, detail="Too many failed attempts. Try again later.")
     user = users.get(username)
-    if not user or not verify_password(password, user["password"]):
-        record_failed_attempt(username)
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    reset_failed_attempts(username)
-    return {"message": "Login successful"}
+    if not user or not pwd_context.verify(password, user['password_hash']):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"message": "Login successful", "user": username}
 
+@app.post("/invest")
+def invest(username: str = Form(...), amount: float = Form(...)):
+    if username not in users:
+        raise HTTPException(status_code=404, detail="User not found")
+    if username in investments:
+        raise HTTPException(status_code=400, detail="Already invested")
+    investments[username] = {"username": username, "amount": amount}
+    users[username]['balance'] += amount * 0.3  # 30% daily earnings for demo
+    return {"message": "Investment successful"}
+
+@app.post("/withdraw")
+def withdraw(username: str = Form(...), amount: float = Form(...)):
+    if username not in users:
+        raise HTTPException(status_code=404, detail="User not found")
+    if users[username]['balance'] < amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    users[username]['balance'] -= amount
+    withdrawals.setdefault(username, []).append(amount)
+    return {"message": "Withdrawal successful, will be processed"}
+
+# Admin endpoints
 @app.get("/admin/view_users")
-def view_users(username: str = ""):
-    if username != "admin":
-        raise HTTPException(status_code=403, detail="Unauthorized")
+def view_users():
     return users
 
 @app.get("/admin/view_investments")
-def view_investments(username: str = ""):
-    if username != "admin":
-        raise HTTPException(status_code=403, detail="Unauthorized")
+def view_investments():
     return investments
 
-@app.post("/invest")
-def invest(username: str = Form(...), amount: int = Form(...)):
-    if username not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    if username not in investments:
-        investments[username] = {"amount": 0, "timestamp": time.time()}
-    investments[username]["amount"] += amount
-    users[username]["balance"] += amount
-    return {"message": f"Invested KES {amount} successfully"}
-
-@app.post("/withdraw")
-def withdraw(username: str = Form(...), amount: int = Form(...)):
-    if username not in users:
-        raise HTTPException(status_code=404, detail="User not found")
-    if users[username]["balance"] < amount:
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    users[username]["balance"] -= amount
-    withdrawals.setdefault(username, []).append({
-        "amount": amount,
-        "timestamp": time.time()
-    })
-    return {"message": "Withdrawal successful"}
-
-@app.get("/")
-def home():
-    return {"message": "Welcome to Jipate Bonus!"}
+# Create default admin
+admin_password = pwd_context.hash("Admin12345!")
+users["admin"] = User(username="admin", password_hash=admin_password, approved=True).dict()
