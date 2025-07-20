@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
 import bcrypt, time
@@ -11,8 +12,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://jipate-bonus-v1-bcti.vercel.app",
-        "https://*.onrender.com",
-        "http://localhost:3000",  # for local dev
+        "https://repo-1red-jipate-bonus.onrender.com",
+        "http://localhost:3000",
+        "http://localhost:8000"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -24,14 +26,15 @@ users = {}
 investments = {}
 login_attempts = {}
 
-# Hardcoded admin credentials
+# Admin credentials
 ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin4857"  # New secure admin password
+ADMIN_PASSWORD = "admin4857"  # Secure admin password
 
 
 # ====== MODELS ======
 class User(BaseModel):
     username: str
+    number: str
     password_hash: str
     approved: bool = False
     referral: str = None
@@ -78,9 +81,16 @@ def register(
         raise HTTPException(400, "Username already exists")
     if password != confirm:
         raise HTTPException(400, "Passwords do not match")
+    if not number.isdigit() or len(number) < 10:
+        raise HTTPException(400, "Enter a valid number")
     
     h = hash_pwd(password)
-    users[username] = User(username=username, password_hash=h, referral=referral).dict()
+    users[username] = User(
+        username=username,
+        number=number,
+        password_hash=h,
+        referral=referral
+    ).dict()
     
     if referral in users:
         users[referral]["referred_users"].append(username)
