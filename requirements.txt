@@ -1,5 +1,4 @@
 fastapi
 uvicorn
+bcrypt
 python-multipart
-pydantic
-python‑bcrypt
