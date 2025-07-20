@@ -3,9 +3,13 @@ services:
     name: jipate-backend
     env: python
     plan: free
-    region: oregon  # You can change this to your closest region
+    region: oregon  # Change this to your closest region if needed
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host=0.0.0.0 --port=10000
     envVars:
       - key: PORT
         value: 10000
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        value: your_secure_admin_password
