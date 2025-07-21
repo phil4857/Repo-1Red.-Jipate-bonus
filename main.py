@@ -4,40 +4,35 @@ from passlib.context import CryptContext
 from datetime import datetime
 import os, json, time, logging
 
-# ===== LOGGING SETUP =====
+# ===== Logging Setup =====
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ===== APP INIT & CORS CONFIG =====
+# ===== App Initialization =====
 app = FastAPI()
+
+# ===== CORS Configuration =====
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://jipate-bonus-v1-fo81-32ecwht8n-phil4857s-projects.vercel.app",  # Frontend
-        "https://jipate-bonus-v1-fo81-git-main-phil4857s-projects.vercel.app",   # Frontend (Git branch)
-        "https://repo-1red-jipate-bonus-1.onrender.com",                         # Backend
-        "http://localhost:3000",
-        "http://localhost:8000"
+        "http://localhost:3000",  # local frontend
+        "https://your-vercel-app.vercel.app",  # your production frontend (replace with actual)
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ===== INCLUDE ADMIN ROUTES =====
-from admin import router as admin_router
-app.include_router(admin_router)
-
-# ===== PASSWORD HASHING =====
+# ===== Password Hashing =====
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ===== FILE PATHS =====
+# ===== File Paths =====
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 INVESTMENTS_FILE = os.path.join(DATA_DIR, "investments.json")
 
-# ===== UTILITIES =====
+# ===== Utility Functions =====
 def read_data(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r") as f:
@@ -49,17 +44,15 @@ def write_data(filepath, data):
     with open(filepath, "w") as f:
         json.dump(data, f, indent=4)
 
-# ===== STARTUP LOG =====
 @app.on_event("startup")
 def startup_event():
-    logger.info("🚀 Jipate Bonus Backend started successfully")
-
-# ===== ROUTES =====
+    logger.info("🚀 Backend started")
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to Jipate Bonus Investment Platform 🎉"}
+    return {"message": "Jipate Bonus API is live ✅"}
 
+# ===== Register Route =====
 @app.post("/register")
 def register(
     username: str = Form(...),
@@ -86,33 +79,48 @@ def register(
         "password_hash": pwd_context.hash(password),
         "referral": referral,
         "referred_users": [],
-        "approved": False,
+        "approved": username == "admin",  # auto approve admin
+        "is_admin": username == "admin",
         "balance": 0.0,
         "earnings": 0.0,
         "last_earning_time": time.time(),
         "registered_at": datetime.utcnow().isoformat()
     }
 
-    if referral in users:
+    if referral and referral in users:
         users[referral]["referred_users"].append(username)
 
     write_data(USERS_FILE, users)
-    logger.info(f"✅ New registration: {username}")
-    return {"message": "User registered successfully"}
+    logger.info(f"✅ Registered: {username}")
 
+    return {
+        "message": "Registration successful",
+        "username": username,
+        "is_admin": username == "admin",
+        "redirect": "admin.html" if username == "admin" else "dashboard.html"
+    }
+
+# ===== Login Route =====
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     users = read_data(USERS_FILE)
     user = users.get(username)
 
     if not user or not pwd_context.verify(password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user["approved"]:
         raise HTTPException(status_code=403, detail="Account not yet approved by admin")
 
-    logger.info(f"🔐 Login: {username}")
-    return {"message": f"Welcome {username}"}
+    logger.info(f"🔓 Login: {username}")
 
+    return {
+        "message": f"Welcome back {username}",
+        "username": username,
+        "is_admin": user.get("is_admin", False),
+        "redirect": "admin.html" if user.get("is_admin") else "dashboard.html"
+    }
+
+# ===== Investment Route =====
 @app.post("/invest")
 def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
     users = read_data(USERS_FILE)
@@ -121,14 +129,15 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
     if username not in users:
         raise HTTPException(status_code=404, detail="User not found")
     if not users[username]["approved"]:
-        raise HTTPException(status_code=403, detail="User is not approved")
+        raise HTTPException(status_code=403, detail="Not approved")
     if username in investments:
-        raise HTTPException(status_code=400, detail="User has already invested")
+        raise HTTPException(status_code=400, detail="Already invested")
     if not transaction_ref.strip():
-        raise HTTPException(status_code=400, detail="Transaction reference required")
+        raise HTTPException(status_code=400, detail="Missing transaction reference")
 
-    # 5% Sunday discount
-    adjusted_amount = amount * (0.95 if datetime.utcnow().strftime("%A") == "Sunday" else 1.0)
+    # Apply Sunday 5% discount
+    today = datetime.utcnow().strftime("%A")
+    adjusted_amount = amount * 0.95 if today == "Sunday" else amount
 
     investments[username] = {
         "username": username,
@@ -139,9 +148,11 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
     }
 
     write_data(INVESTMENTS_FILE, investments)
-    logger.info(f"💰 Investment submitted by {username}: KES {adjusted_amount:.2f}")
-    return {"message": f"Investment of KES {adjusted_amount:.2f} submitted successfully"}
+    logger.info(f"💰 Investment from {username}: {adjusted_amount}")
 
+    return {"message": "Investment submitted", "amount": adjusted_amount}
+
+# ===== Daily Earnings Route =====
 @app.post("/earnings/daily")
 def credit_daily_earnings():
     users = read_data(USERS_FILE)
@@ -155,17 +166,20 @@ def credit_daily_earnings():
         user = users.get(username)
         if not user:
             continue
-        if now - user.get("last_earning_time", 0) >= 86400:
-            earning = inv["amount"] * 0.10
+        last_time = user.get("last_earning_time", 0)
+        if now - last_time >= 86400:
+            earning = inv["amount"] * 0.1
             user["balance"] += earning
             user["earnings"] += earning
             user["last_earning_time"] = now
             count += 1
 
     write_data(USERS_FILE, users)
-    logger.info(f"✅ Credited daily earnings to {count} user(s)")
-    return {"message": f"Earnings credited for {count} user(s)"}
+    logger.info(f"✅ {count} users credited")
 
+    return {"message": f"Credited daily earnings for {count} users"}
+
+# ===== Withdrawal Route =====
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     users = read_data(USERS_FILE)
@@ -179,6 +193,7 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     invested = inv["amount"]
     balance = user["balance"]
 
+    # Calculate limit
     if invested < 1000:
         limit = 150
     elif invested < 1500:
@@ -193,5 +208,6 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
 
     user["balance"] -= amount
     write_data(USERS_FILE, users)
-    logger.info(f"💸 Withdrawal by {username}: KES {amount:.2f}")
-    return {"message": f"Withdrawal request of KES {amount:.2f} submitted"}
+    logger.info(f"💸 {username} withdrew {amount}")
+
+    return {"message": f"Withdrawal of KES {amount} successful"}
