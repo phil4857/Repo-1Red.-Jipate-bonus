@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -15,18 +15,16 @@ app = FastAPI()
 # === CORS ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://your-vercel-app.vercel.app",  # Replace with actual deployed frontend
-    ],
+    allow_origins=["*"],  # TEMP: Accept all origins (adjust in prod)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# === Password Hashing ===
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# === Data Paths ===
+# === Paths ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -55,7 +53,15 @@ class LoginData(BaseModel):
     username: str
     password: str
 
-# === Register Route ===
+# === Routes ===
+@app.get("/")
+def root():
+    return {"message": "Jipate Bonus backend is running ✅"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 @app.post("/register")
 def register(data: RegisterData):
     users = read_data(USERS_FILE)
@@ -97,7 +103,6 @@ def register(data: RegisterData):
         "redirect": "admin.html" if data.username == "admin" else "dashboard.html"
     }
 
-# === Login Route ===
 @app.post("/login")
 def login(data: LoginData):
     users = read_data(USERS_FILE)
