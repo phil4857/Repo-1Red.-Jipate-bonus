@@ -1,21 +1,21 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from datetime import datetime
 import os, json, time, logging
 
-# === Logging ===
+# === Logging Setup ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === App ===
+# === FastAPI App Setup ===
 app = FastAPI()
 
-# === CORS ===
+# === CORS Setup ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with ["https://your-vercel-app.vercel.app"] in production
+    allow_origins=["*"],  # In production, restrict this
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,12 +24,12 @@ app.add_middleware(
 # === Password Hashing ===
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# === Paths ===
+# === File Paths ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 
-# === I/O Helpers ===
+# === I/O Utilities ===
 def read_data(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r") as f:
@@ -40,6 +40,27 @@ def write_data(filepath, data):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=4)
+
+# === Ensure users.json Exists with Admin Account ===
+if not os.path.exists(USERS_FILE):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    default_admin = {
+        "admin": {
+            "username": "admin",
+            "number": "0700000000",
+            "password_hash": pwd_context.hash("adminmutegi4857"),
+            "referral": None,
+            "referred_users": [],
+            "approved": True,
+            "is_admin": True,
+            "balance": 0.0,
+            "earnings": 0.0,
+            "last_earning_time": time.time(),
+            "registered_at": datetime.utcnow().isoformat()
+        }
+    }
+    write_data(USERS_FILE, default_admin)
+    logger.info("✅ Default admin account created")
 
 # === Models ===
 class RegisterData(BaseModel):
@@ -87,6 +108,7 @@ def register(data: RegisterData):
         raise HTTPException(status_code=400, detail="Passwords do not match")
     if not number.isdigit() or len(number) != 10:
         raise HTTPException(status_code=400, detail="Phone number must be exactly 10 digits")
+
     for user in users.values():
         if user["number"] == number:
             raise HTTPException(status_code=400, detail="Phone number already registered")
@@ -109,7 +131,7 @@ def register(data: RegisterData):
         users[data.referral]["referred_users"].append(username)
 
     write_data(USERS_FILE, users)
-    logger.info(f"✅ Registered: {username}")
+    logger.info(f"✅ Registered user: {username}")
 
     return {
         "message": "Registration successful",
@@ -146,6 +168,68 @@ def login(data: LoginData):
 def get_users():
     users = read_data(USERS_FILE)
     return list(users.values())
+
+@app.get("/user/{username}")
+def get_user(username: str):
+    users = read_data(USERS_FILE)
+    user = users.get(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    safe_user = {
+        "username": user["username"],
+        "number": user["number"],
+        "referral": user.get("referral"),
+        "approved": user.get("approved", False),
+        "balance": user.get("balance", 0.0),
+        "registered_at": user.get("registered_at")
+    }
+    return safe_user
+
+@app.get("/referrals/{username}")
+def get_referrals(username: str):
+    users = read_data(USERS_FILE)
+    user = users.get(username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return user.get("referred_users", [])
+
+@app.post("/invest")
+def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
+    users = read_data(USERS_FILE)
+    user = users.get(username)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid investment amount")
+
+    user["balance"] += amount
+    users[username] = user
+    write_data(USERS_FILE, users)
+
+    logger.info(f"💰 {username} invested KES {amount} via {transaction_ref}")
+    return {"message": f"Investment of KES {amount} recorded successfully."}
+
+@app.post("/withdraw")
+def withdraw(username: str = Form(...), amount: float = Form(...)):
+    users = read_data(USERS_FILE)
+    user = users.get(username)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if amount <= 0 or amount > user["balance"]:
+        raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+
+    user["balance"] -= amount
+    users[username] = user
+    write_data(USERS_FILE, users)
+
+    logger.info(f"🏧 {username} withdrew KES {amount}")
+    return {"message": f"Withdrawal of KES {amount} submitted for processing."}
 
 @app.post("/admin/reset-password")
 def reset_password(data: ResetPasswordData):
