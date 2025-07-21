@@ -15,7 +15,7 @@ app = FastAPI()
 # === CORS ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TEMP: Accept all origins (adjust in prod)
+    allow_origins=["*"],  # Replace with ["https://your-vercel-app.vercel.app"] in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,8 +28,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
-INVESTMENTS_FILE = os.path.join(DATA_DIR, "investments.json")
 
+# === I/O Helpers ===
 def read_data(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r") as f:
@@ -53,7 +53,14 @@ class LoginData(BaseModel):
     username: str
     password: str
 
+class ResetPasswordData(BaseModel):
+    admin_username: str
+    admin_password: str
+    target_username: str
+    new_password: str
+
 # === Routes ===
+
 @app.get("/")
 def root():
     return {"message": "Jipate Bonus backend is running ✅"}
@@ -66,24 +73,32 @@ def health():
 def register(data: RegisterData):
     users = read_data(USERS_FILE)
 
-    if data.username in users:
+    username = data.username.strip()
+    number = data.number.strip()
+    password = data.password
+    confirm = data.confirm
+
+    if not username or not number or not password or not confirm:
+        raise HTTPException(status_code=400, detail="All fields are required")
+
+    if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
-    if data.password != data.confirm:
+    if password != confirm:
         raise HTTPException(status_code=400, detail="Passwords do not match")
-    if not data.number.isdigit() or len(data.number) < 10:
-        raise HTTPException(status_code=400, detail="Invalid phone number")
+    if not number.isdigit() or len(number) != 10:
+        raise HTTPException(status_code=400, detail="Phone number must be exactly 10 digits")
     for user in users.values():
-        if user["number"] == data.number:
+        if user["number"] == number:
             raise HTTPException(status_code=400, detail="Phone number already registered")
 
-    users[data.username] = {
-        "username": data.username,
-        "number": data.number,
-        "password_hash": pwd_context.hash(data.password),
+    users[username] = {
+        "username": username,
+        "number": number,
+        "password_hash": pwd_context.hash(password),
         "referral": data.referral,
         "referred_users": [],
-        "approved": data.username == "admin",
-        "is_admin": data.username == "admin",
+        "approved": username == "admin",
+        "is_admin": username == "admin",
         "balance": 0.0,
         "earnings": 0.0,
         "last_earning_time": time.time(),
@@ -91,33 +106,60 @@ def register(data: RegisterData):
     }
 
     if data.referral and data.referral in users:
-        users[data.referral]["referred_users"].append(data.username)
+        users[data.referral]["referred_users"].append(username)
 
     write_data(USERS_FILE, users)
-    logger.info(f"✅ Registered: {data.username}")
+    logger.info(f"✅ Registered: {username}")
 
     return {
         "message": "Registration successful",
-        "username": data.username,
-        "is_admin": data.username == "admin",
-        "redirect": "admin.html" if data.username == "admin" else "dashboard.html"
+        "username": username,
+        "is_admin": username == "admin",
+        "redirect": "admin.html" if username == "admin" else "dashboard.html"
     }
 
 @app.post("/login")
 def login(data: LoginData):
     users = read_data(USERS_FILE)
-    user = users.get(data.username)
+    username = data.username.strip()
+    password = data.password
 
-    if not user or not pwd_context.verify(data.password, user["password_hash"]):
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+
+    user = users.get(username)
+    if not user or not pwd_context.verify(password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user["approved"]:
         raise HTTPException(status_code=403, detail="Account not yet approved by admin")
 
-    logger.info(f"🔓 Login: {data.username}")
+    logger.info(f"🔓 Login successful: {username}")
 
     return {
-        "message": f"Welcome back {data.username}",
-        "username": data.username,
+        "message": f"Welcome back {username}",
+        "username": username,
         "is_admin": user.get("is_admin", False),
         "redirect": "admin.html" if user.get("is_admin") else "dashboard.html"
     }
+
+@app.get("/users")
+def get_users():
+    users = read_data(USERS_FILE)
+    return list(users.values())
+
+@app.post("/admin/reset-password")
+def reset_password(data: ResetPasswordData):
+    users = read_data(USERS_FILE)
+
+    admin = users.get(data.admin_username)
+    if not admin or not admin.get("is_admin") or not pwd_context.verify(data.admin_password, admin["password_hash"]):
+        raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin credentials")
+
+    if data.target_username not in users:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    users[data.target_username]["password_hash"] = pwd_context.hash(data.new_password)
+    write_data(USERS_FILE, users)
+    logger.info(f"🔁 Password reset for {data.target_username} by {data.admin_username}")
+
+    return {"message": f"Password for {data.target_username} has been reset successfully"}
