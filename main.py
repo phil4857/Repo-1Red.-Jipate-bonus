@@ -178,9 +178,10 @@ def get_users():
 @app.get("/user/{username}")
 def get_user(username: str):
     users = read_data(USERS_FILE)
-    user = users.get(username)
-    if not user:
+    username = username.strip().lower()
+    if username not in users:
         raise HTTPException(status_code=404, detail="User not found")
+    user = users[username]
     return {
         "username": user["username"],
         "number": user["number"],
@@ -194,14 +195,15 @@ def get_user(username: str):
 @app.get("/referrals/{username}")
 def get_referrals(username: str):
     users = read_data(USERS_FILE)
-    user = users.get(username)
-    if not user:
+    username = username.strip().lower()
+    if username not in users:
         raise HTTPException(status_code=404, detail="User not found")
-    return user.get("referred_users", [])
+    return users[username].get("referred_users", [])
 
 @app.post("/invest")
 def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
     users = read_data(USERS_FILE)
+    username = username.strip().lower()
     user = users.get(username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -217,6 +219,7 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     users = read_data(USERS_FILE)
+    username = username.strip().lower()
     user = users.get(username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -232,29 +235,31 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
 @app.post("/admin/reset-password")
 def reset_password(data: ResetPasswordData):
     users = read_data(USERS_FILE)
-    admin = users.get(data.admin_username)
+    admin = users.get(data.admin_username.strip().lower())
     if not admin or not admin.get("is_admin") or not pwd_context.verify(data.admin_password, admin["password_hash"]):
         raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin credentials")
 
-    if data.target_username not in users:
+    target = data.target_username.strip().lower()
+    if target not in users:
         raise HTTPException(status_code=404, detail="User not found")
 
-    users[data.target_username]["password_hash"] = pwd_context.hash(data.new_password)
+    users[target]["password_hash"] = pwd_context.hash(data.new_password)
     write_data(USERS_FILE, users)
-    logger.info(f"🔁 Password reset for {data.target_username} by {data.admin_username}")
-    return {"message": f"Password for {data.target_username} has been reset successfully"}
+    logger.info(f"🔁 Password reset for {target} by {data.admin_username}")
+    return {"message": f"Password for {target} has been reset successfully"}
 
 @app.post("/admin/approve-user")
 def approve_user(data: ApproveUserData):
     users = read_data(USERS_FILE)
-    admin = users.get(data.admin_username)
+    admin = users.get(data.admin_username.strip().lower())
     if not admin or not admin.get("is_admin") or not pwd_context.verify(data.admin_password, admin["password_hash"]):
         raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin credentials")
 
-    if data.target_username not in users:
+    target = data.target_username.strip().lower()
+    if target not in users:
         raise HTTPException(status_code=404, detail="User not found")
 
-    users[data.target_username]["approved"] = True
+    users[target]["approved"] = True
     write_data(USERS_FILE, users)
-    logger.info(f"✅ User {data.target_username} approved by admin {data.admin_username}")
-    return {"message": f"User {data.target_username} has been approved successfully"}
+    logger.info(f"✅ User {target} approved by admin {data.admin_username}")
+    return {"message": f"User {target} has been approved successfully"}
