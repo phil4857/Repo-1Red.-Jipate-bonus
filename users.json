@@ -4,12 +4,25 @@
     "number": "0712345678",
     "password_hash": "$2b$12$SmPvke14Lw9P1jcQw8wli.svSH9HgI4nh5w6m6QOU3opmAfu6MgXa",
     "referral": null,
-    "referred_users": [],
+    "referred_users": ["johndoe"],
     "approved": true,
     "is_admin": true,
     "balance": 0.0,
     "earnings": 0.0,
     "last_earning_time": 1721580000.0,
     "registered_at": "2024-01-01T00:00:00Z"
+  },
+  "johndoe": {
+    "username": "johndoe",
+    "number": "0711223344",
+    "password_hash": "$2b$12$wKkG2pMn8dTxGpXOzlbJeOxD4E58AejboE6.ZgZKf7kW7MErz4VMS",  // password: test1234
+    "referral": "admin",
+    "referred_users": [],
+    "approved": false,
+    "is_admin": false,
+    "balance": 100.0,
+    "earnings": 10.0,
+    "last_earning_time": 1721580000.0,
+    "registered_at": "2025-07-21T00:00:00Z"
   }
 }
