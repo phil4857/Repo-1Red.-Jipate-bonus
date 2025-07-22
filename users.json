@@ -15,7 +15,7 @@
   "johndoe": {
     "username": "johndoe",
     "number": "0711223344",
-    "password_hash": "$2b$12$wKkG2pMn8dTxGpXOzlbJeOxD4E58AejboE6.ZgZKf7kW7MErz4VMS",  // password: test1234
+    "password_hash": "$2b$12$wKkG2pMn8dTxGpXOzlbJeOxD4E58AejboE6.ZgZKf7kW7MErz4VMS",
     "referral": "admin",
     "referred_users": [],
     "approved": false,
