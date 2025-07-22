@@ -48,7 +48,7 @@ if not os.path.exists(USERS_FILE):
         "admin": {
             "username": "admin",
             "number": "0700000000",
-            "password_hash": pwd_context.hash("adminmutegi4857"),
+            "password_hash": pwd_context.hash("philmutegi4857"),  # ✅ Updated admin password
             "referral": None,
             "referred_users": [],
             "approved": True,
@@ -133,8 +133,8 @@ def register(data: RegisterData):
         "registered_at": datetime.utcnow().isoformat()
     }
 
-    if data.referral and data.referral in users:
-        users[data.referral]["referred_users"].append(username)
+    if data.referral and data.referral.lower() in users:
+        users[data.referral.lower()]["referred_users"].append(username)
 
     write_data(USERS_FILE, users)
     logger.info(f"✅ Registered user: {username}")
