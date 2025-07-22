@@ -223,12 +223,12 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     user = users.get(username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    # enforce your min-withdrawal tiers here if needed
     if amount <= 0 or amount > user["balance"]:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
 
     user["balance"] -= amount
     users[username] = user
-
     withdrawals.setdefault(username, []).append({
         "amount": amount,
         "timestamp": datetime.utcnow().isoformat()
@@ -262,14 +262,15 @@ def approve_user(data: ApproveUserData):
     if not admin or not admin.get("is_admin") or not pwd_context.verify(data.admin_password, admin["password_hash"]):
         raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin credentials")
 
+    # **Fixed approval flow**: use the correct field name
     target = data.target_username.strip().lower()
     if target not in users:
         raise HTTPException(status_code=404, detail="User not found")
 
     users[target]["approved"] = True
     write_data(USERS_FILE, users)
-    logger.info(f"✅ User {target} approved by admin {data.admin_username}")
-    return {"message": f"User {target} has been approved successfully"}
+    logger.info(f"✅ User '{target}' approved by admin '{data.admin_username}'")
+    return {"message": f"User '{target}' has been approved successfully"}
 
 @app.get("/invest-dashboard/{username}")
 def invest_dashboard(username: str):
@@ -285,27 +286,25 @@ def invest_dashboard(username: str):
     last_time = user.get("last_earning_time", now)
     seconds_elapsed = now - last_time
 
-    # Daily bonus: 1% of balance per day
-    days = int(seconds_elapsed // 86400)
-    daily_bonus_rate = 0.01
-    earned_bonus = user["balance"] * daily_bonus_rate * days if days > 0 else 0
-
-    if earned_bonus > 0:
-        user["earnings"] += earned_bonus
+    # 10% daily bonus, only once per 24h
+    if seconds_elapsed >= 86400:
+        earned = user["balance"] * 0.10
+        user["earnings"] += earned
         user["last_earning_time"] = now
         users[username] = user
         write_data(USERS_FILE, users)
+    else:
+        earned = 0.0
 
     referral_link = f"https://jipatebonus.co.ke/register?ref={username}"
-    withdrawal_history = withdrawals.get(username, [])
+    history = withdrawals.get(username, [])
 
     return {
         "username": username,
         "balance": user["balance"],
-        "earnings": round(user["earnings"], 2),
+        "earnings": round(user["earnings"],2),
+        "daily_bonus_added": round(earned,2),
         "referral_link": referral_link,
-        "daily_bonus_added": round(earned_bonus, 2),
         "referred_users": user.get("referred_users", []),
-        "withdrawal_history": withdrawal_history,
-        "message": f"Investment dashboard for {username}"
+        "withdrawal_history": history
     }
