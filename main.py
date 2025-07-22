@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from passlib.context import CryptContext
-from datetime import datetime
+from datetime import datetime, timedelta
 import os, json, time, logging
 
 # === Logging Setup ===
@@ -15,7 +15,7 @@ app = FastAPI()
 # === CORS Setup ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 🔐 In production, restrict origins
+    allow_origins=["*"],  # 🔐 Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,6 +28,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
+WITHDRAWALS_FILE = os.path.join(DATA_DIR, "withdrawals.json")
 
 # === I/O Utilities ===
 def read_data(filepath):
@@ -48,7 +49,7 @@ if not os.path.exists(USERS_FILE):
         "admin": {
             "username": "admin",
             "number": "0700000000",
-            "password_hash": pwd_context.hash("philmutegi4857"),  # ✅ Updated admin password
+            "password_hash": pwd_context.hash("philmutegi4857"),
             "referral": None,
             "referred_users": [],
             "approved": True,
@@ -86,7 +87,6 @@ class ApproveUserData(BaseModel):
     target_username: str
 
 # === Routes ===
-
 @app.get("/")
 def root():
     return {"message": "Jipate Bonus backend is running ✅"}
@@ -138,7 +138,6 @@ def register(data: RegisterData):
 
     write_data(USERS_FILE, users)
     logger.info(f"✅ Registered user: {username}")
-
     return {
         "message": "Registration successful",
         "username": username,
@@ -219,6 +218,7 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     users = read_data(USERS_FILE)
+    withdrawals = read_data(WITHDRAWALS_FILE)
     username = username.strip().lower()
     user = users.get(username)
     if not user:
@@ -228,7 +228,14 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
 
     user["balance"] -= amount
     users[username] = user
+
+    withdrawals.setdefault(username, []).append({
+        "amount": amount,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
     write_data(USERS_FILE, users)
+    write_data(WITHDRAWALS_FILE, withdrawals)
     logger.info(f"🏧 {username} withdrew KES {amount}")
     return {"message": f"Withdrawal of KES {amount} submitted for processing."}
 
@@ -263,3 +270,42 @@ def approve_user(data: ApproveUserData):
     write_data(USERS_FILE, users)
     logger.info(f"✅ User {target} approved by admin {data.admin_username}")
     return {"message": f"User {target} has been approved successfully"}
+
+@app.get("/invest-dashboard/{username}")
+def invest_dashboard(username: str):
+    users = read_data(USERS_FILE)
+    withdrawals = read_data(WITHDRAWALS_FILE)
+    username = username.strip().lower()
+
+    if username not in users:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user = users[username]
+    now = time.time()
+    last_time = user.get("last_earning_time", now)
+    seconds_elapsed = now - last_time
+
+    # Daily bonus: 1% of balance per day
+    days = int(seconds_elapsed // 86400)
+    daily_bonus_rate = 0.01
+    earned_bonus = user["balance"] * daily_bonus_rate * days if days > 0 else 0
+
+    if earned_bonus > 0:
+        user["earnings"] += earned_bonus
+        user["last_earning_time"] = now
+        users[username] = user
+        write_data(USERS_FILE, users)
+
+    referral_link = f"https://jipatebonus.co.ke/register?ref={username}"
+    withdrawal_history = withdrawals.get(username, [])
+
+    return {
+        "username": username,
+        "balance": user["balance"],
+        "earnings": round(user["earnings"], 2),
+        "referral_link": referral_link,
+        "daily_bonus_added": round(earned_bonus, 2),
+        "referred_users": user.get("referred_users", []),
+        "withdrawal_history": withdrawal_history,
+        "message": f"Investment dashboard for {username}"
+    }
