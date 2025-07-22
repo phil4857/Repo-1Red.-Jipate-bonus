@@ -15,7 +15,7 @@ app = FastAPI()
 # === CORS Setup ===
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this
+    allow_origins=["*"],  # 🔐 In production, use specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -94,21 +94,19 @@ def health():
 def register(data: RegisterData):
     users = read_data(USERS_FILE)
 
-    username = data.username.strip()
+    username = data.username.strip().lower()
     number = data.number.strip()
     password = data.password
     confirm = data.confirm
 
     if not username or not number or not password or not confirm:
         raise HTTPException(status_code=400, detail="All fields are required")
-
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
     if password != confirm:
         raise HTTPException(status_code=400, detail="Passwords do not match")
     if not number.isdigit() or len(number) != 10:
         raise HTTPException(status_code=400, detail="Phone number must be exactly 10 digits")
-
     for user in users.values():
         if user["number"] == number:
             raise HTTPException(status_code=400, detail="Phone number already registered")
@@ -119,7 +117,7 @@ def register(data: RegisterData):
         "password_hash": pwd_context.hash(password),
         "referral": data.referral,
         "referred_users": [],
-        "approved": username == "admin",
+        "approved": username == "admin",  # admin auto-approved
         "is_admin": username == "admin",
         "balance": 0.0,
         "earnings": 0.0,
@@ -127,6 +125,7 @@ def register(data: RegisterData):
         "registered_at": datetime.utcnow().isoformat()
     }
 
+    # Handle referral link
     if data.referral and data.referral in users:
         users[data.referral]["referred_users"].append(username)
 
@@ -143,7 +142,7 @@ def register(data: RegisterData):
 @app.post("/login")
 def login(data: LoginData):
     users = read_data(USERS_FILE)
-    username = data.username.strip()
+    username = data.username.strip().lower()
     password = data.password
 
     if not username or not password:
@@ -176,15 +175,15 @@ def get_user(username: str):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    safe_user = {
+    return {
         "username": user["username"],
         "number": user["number"],
         "referral": user.get("referral"),
         "approved": user.get("approved", False),
         "balance": user.get("balance", 0.0),
+        "earnings": user.get("earnings", 0.0),
         "registered_at": user.get("registered_at")
     }
-    return safe_user
 
 @app.get("/referrals/{username}")
 def get_referrals(username: str):
@@ -202,7 +201,6 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
     if amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid investment amount")
 
@@ -220,7 +218,6 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
     if amount <= 0 or amount > user["balance"]:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
 
