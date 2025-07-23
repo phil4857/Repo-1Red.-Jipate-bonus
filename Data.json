@@ -1,0 +1,20 @@
+{
+  "users": [
+    {
+      "username": "admin",
+      "password": "$2b$12$Uw3SRnS80E2dSKW9URkYfeFkg6mRNGGiYhrNiL6dM.8xi9EPk6UWy",
+      "email": "",
+      "registered_at": "2024-01-01T00:00:00",
+      "is_approved": true,
+      "is_admin": true,
+      "balance": 0.0,
+      "earnings": 0.0,
+      "total_invested": 0.0,
+      "last_bonus_time": null,
+      "referral_code": "",
+      "referred_by": null
+    }
+  ],
+  "investments": [],
+  "withdrawals": []
+}
