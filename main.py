@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import json
 import os
@@ -9,10 +8,10 @@ import bcrypt
 
 app = FastAPI()
 
-# Enable CORS to prevent fetch errors
+# Enable CORS (replace * with actual domain in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with frontend domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,7 +45,7 @@ def find_investment(data, invest_id):
 def is_monday():
     return datetime.now().weekday() == 0
 
-# -------------------- Pydantic Models --------------------
+# -------------------- Models --------------------
 
 class AuthInput(BaseModel):
     username: str
@@ -78,7 +77,7 @@ class ResetPasswordInput(ApproveUserInput):
 # -------------------- Routes --------------------
 
 @app.post("/register")
-async def register(data_in: RegisterInput, request: Request):
+async def register(data_in: RegisterInput):
     data = load_data()
     if find_user(data, data_in.username):
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -204,7 +203,7 @@ async def profile(data_in: AuthInput, request: Request):
         "earnings": user["earnings"],
         "total_invested": user["total_invested"],
         "is_approved": user["is_approved"],
-        "is_admin": user["is_admin"],  # <-- front-end can use this to hide/show admin panel
+        "is_admin": user["is_admin"],
         "last_bonus_time": user.get("last_bonus_time"),
         "referral_link": f"{base_url}/register?ref={user.get('referral_code')}"
     }
