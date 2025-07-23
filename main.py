@@ -8,10 +8,10 @@ import bcrypt
 
 app = FastAPI()
 
-# Enable CORS (replace * with actual domain in production)
+# Allow frontend CORS (update domain in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Replace with frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,13 +34,13 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def find_user(data, username):
-    return next((user for user in data['users'] if user['username'] == username), None)
+    return next((u for u in data['users'] if u['username'] == username), None)
 
 def find_user_by_referral(data, ref_code):
-    return next((user for user in data['users'] if user.get('referral_code') == ref_code), None)
+    return next((u for u in data['users'] if u.get('referral_code') == ref_code), None)
 
 def find_investment(data, invest_id):
-    return next((inv for inv in data['investments'] if inv['id'] == invest_id), None)
+    return next((i for i in data['investments'] if i['id'] == invest_id), None)
 
 def is_monday():
     return datetime.now().weekday() == 0
@@ -63,8 +63,7 @@ class AdminApproveInput(BaseModel):
     admin_password: str
     investment_id: int
 
-class WithdrawInput(InvestmentInput):
-    pass
+class WithdrawInput(InvestmentInput): pass
 
 class ApproveUserInput(BaseModel):
     admin_username: str
@@ -77,35 +76,38 @@ class ResetPasswordInput(ApproveUserInput):
 # -------------------- Routes --------------------
 
 @app.post("/register")
-async def register(data_in: RegisterInput):
+def register(payload: RegisterInput):
     data = load_data()
-    if find_user(data, data_in.username):
+    if find_user(data, payload.username):
         raise HTTPException(status_code=400, detail="Username already exists")
-    ref_user = find_user_by_referral(data, data_in.ref) if data_in.ref else None
-    pw_hash = bcrypt.hashpw(data_in.password.encode(), bcrypt.gensalt()).decode()
+
+    ref_user = find_user_by_referral(data, payload.ref) if payload.ref else None
+    password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
+
     new_user = {
-        'username': data_in.username,
-        'password': pw_hash,
-        'email': data_in.email,
-        'registered_at': datetime.now().isoformat(),
-        'is_approved': False,
-        'is_admin': False,
-        'balance': 0.0,
-        'earnings': 0.0,
-        'total_invested': 0.0,
-        'last_bonus_time': None,
-        'referral_code': os.urandom(6).hex(),
-        'referred_by': ref_user['username'] if ref_user else None
+        "username": payload.username,
+        "password": password_hash,
+        "email": payload.email,
+        "registered_at": datetime.now().isoformat(),
+        "is_approved": False,
+        "is_admin": False,
+        "balance": 0.0,
+        "earnings": 0.0,
+        "total_invested": 0.0,
+        "last_bonus_time": None,
+        "referral_code": os.urandom(6).hex(),
+        "referred_by": ref_user["username"] if ref_user else None
     }
-    data['users'].append(new_user)
+
+    data["users"].append(new_user)
     save_data(data)
     return {"message": "Registration successful. Await admin approval."}
 
 @app.post("/login")
-async def login(data_in: AuthInput):
+def login(payload: AuthInput):
     data = load_data()
-    user = find_user(data, data_in.username)
-    if not user or not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
+    user = find_user(data, payload.username)
+    if not user or not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {
         "message": "Login successful",
@@ -114,74 +116,108 @@ async def login(data_in: AuthInput):
     }
 
 @app.post("/admin/login")
-async def admin_login(data_in: AuthInput):
+def admin_login(payload: AuthInput):
     data = load_data()
-    user = find_user(data, data_in.username)
+    user = find_user(data, payload.username)
     if not user or not user.get("is_admin"):
         raise HTTPException(status_code=401, detail="Admin not found or not authorized")
-    if not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
+    if not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {
         "message": "Admin login successful",
-        "is_admin": user["is_admin"]
+        "is_admin": True
     }
 
 @app.post("/invest")
-async def create_investment(data_in: InvestmentInput):
+def create_investment(payload: InvestmentInput):
     data = load_data()
-    user = find_user(data, data_in.username)
-    if not user or not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
+    user = find_user(data, payload.username)
+    if not user or not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Authentication failed")
     if not user["is_approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
-    if data_in.amount <= 0:
+    if payload.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
+
     investment = {
         "id": len(data["investments"]) + 1,
-        "user": data_in.username,
-        "amount": data_in.amount,
+        "user": payload.username,
+        "amount": payload.amount,
         "is_approved": False
     }
+
     data["investments"].append(investment)
     save_data(data)
     return {"message": "Investment submitted. Await admin approval."}
 
 @app.post("/admin/approve_investment")
-async def approve_investment(payload: AdminApproveInput):
+def approve_investment(payload: AdminApproveInput):
     data = load_data()
     admin = find_user(data, payload.admin_username)
-    if not admin or not bcrypt.checkpw(payload.admin_password.encode(), admin['password'].encode()) or not admin.get("is_admin"):
+    if not admin or not bcrypt.checkpw(payload.admin_password.encode(), admin["password"].encode()) or not admin.get("is_admin"):
         raise HTTPException(status_code=401, detail="Admin authentication failed")
+
     investment = find_investment(data, payload.investment_id)
     if not investment:
         raise HTTPException(status_code=404, detail="Investment not found")
     if investment["is_approved"]:
         raise HTTPException(status_code=400, detail="Already approved")
+
     investment["is_approved"] = True
     user = find_user(data, investment["user"])
     if user:
         user["balance"] += investment["amount"]
         user["total_invested"] += investment["amount"]
+
         ref = find_user(data, user.get("referred_by"))
         if ref and ref.get("is_approved"):
-            ref["balance"] += 50.0
-            ref["earnings"] += 50.0
+            ref["balance"] += 50
+            ref["earnings"] += 50
+
     save_data(data)
     return {"message": "Investment approved and credited"}
 
-@app.post("/daily_bonus")
-async def daily_bonus(data_in: AuthInput):
+@app.post("/withdraw")
+def withdraw(payload: WithdrawInput):
     data = load_data()
-    user = find_user(data, data_in.username)
-    if not user or not bcrypt.checkpw(data_in.password.encode(), user["password"].encode()):
+    user = find_user(data, payload.username)
+    if not user or not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Authentication failed")
     if not user["is_approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
+    if payload.amount <= 0 or payload.amount > user["balance"]:
+        raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+    min_withdraw = 0.3 * user["total_invested"]
+    if payload.amount < min_withdraw:
+        raise HTTPException(status_code=400, detail=f"Minimum withdrawal is {min_withdraw:.2f}")
+    if not is_monday():
+        raise HTTPException(status_code=400, detail="Withdrawals only allowed on Mondays")
+
+    user["balance"] -= payload.amount
+    data["withdrawals"].append({
+        "id": len(data["withdrawals"]) + 1,
+        "user": payload.username,
+        "amount": payload.amount,
+        "date": datetime.now().isoformat()
+    })
+    save_data(data)
+    return {"message": f"Withdrawal of {payload.amount:.2f} processed"}
+
+@app.post("/daily_bonus")
+def daily_bonus(payload: AuthInput):
+    data = load_data()
+    user = find_user(data, payload.username)
+    if not user or not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    if not user["is_approved"]:
+        raise HTTPException(status_code=403, detail="Account not approved")
+
     now = datetime.now()
     if user["last_bonus_time"]:
         last = datetime.fromisoformat(user["last_bonus_time"])
         if (now - last) < timedelta(hours=24):
             raise HTTPException(status_code=400, detail="Bonus already claimed")
+
     bonus = 0.1 * user["balance"]
     user["balance"] += bonus
     user["earnings"] += bonus
@@ -189,52 +225,8 @@ async def daily_bonus(data_in: AuthInput):
     save_data(data)
     return {"message": f"Daily bonus of {bonus:.2f} credited", "bonus": bonus}
 
-@app.post("/profile")
-async def profile(data_in: AuthInput, request: Request):
-    data = load_data()
-    user = find_user(data, data_in.username)
-    if not user or not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
-        raise HTTPException(status_code=401, detail="Authentication failed")
-    base_url = str(request.base_url).rstrip("/")
-    return {
-        "username": user["username"],
-        "email": user.get("email"),
-        "balance": user["balance"],
-        "earnings": user["earnings"],
-        "total_invested": user["total_invested"],
-        "is_approved": user["is_approved"],
-        "is_admin": user["is_admin"],
-        "last_bonus_time": user.get("last_bonus_time"),
-        "referral_link": f"{base_url}/register?ref={user.get('referral_code')}"
-    }
-
-@app.post("/withdraw")
-async def withdraw(data_in: WithdrawInput):
-    data = load_data()
-    user = find_user(data, data_in.username)
-    if not user or not bcrypt.checkpw(data_in.password.encode(), user["password"].encode()):
-        raise HTTPException(status_code=401, detail="Authentication failed")
-    if not user["is_approved"]:
-        raise HTTPException(status_code=403, detail="Account not approved")
-    if data_in.amount <= 0 or data_in.amount > user["balance"]:
-        raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
-    min_withdraw = 0.3 * user["total_invested"]
-    if data_in.amount < min_withdraw:
-        raise HTTPException(status_code=400, detail=f"Minimum withdrawal is {min_withdraw:.2f}")
-    if not is_monday():
-        raise HTTPException(status_code=400, detail="Withdrawals only allowed on Mondays")
-    user["balance"] -= data_in.amount
-    data["withdrawals"].append({
-        "id": len(data["withdrawals"]) + 1,
-        "user": data_in.username,
-        "amount": data_in.amount,
-        "date": datetime.now().isoformat()
-    })
-    save_data(data)
-    return {"message": f"Withdrawal of {data_in.amount:.2f} processed"}
-
 @app.post("/admin/approve_user")
-async def approve_user(payload: ApproveUserInput):
+def approve_user(payload: ApproveUserInput):
     data = load_data()
     admin = find_user(data, payload.admin_username)
     if not admin or not bcrypt.checkpw(payload.admin_password.encode(), admin["password"].encode()) or not admin.get("is_admin"):
@@ -249,7 +241,7 @@ async def approve_user(payload: ApproveUserInput):
     return {"message": f"User {payload.username} approved"}
 
 @app.post("/admin/reset_password")
-async def reset_password(payload: ResetPasswordInput):
+def reset_password(payload: ResetPasswordInput):
     data = load_data()
     admin = find_user(data, payload.admin_username)
     if not admin or not bcrypt.checkpw(payload.admin_password.encode(), admin["password"].encode()) or not admin.get("is_admin"):
@@ -261,16 +253,35 @@ async def reset_password(payload: ResetPasswordInput):
     save_data(data)
     return {"message": f"Password for {payload.username} has been reset"}
 
+@app.post("/profile")
+def profile(payload: AuthInput, request: Request):
+    data = load_data()
+    user = find_user(data, payload.username)
+    if not user or not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
+        raise HTTPException(status_code=401, detail="Authentication failed")
+    base_url = str(request.base_url).rstrip("/")
+    return {
+        "username": user["username"],
+        "email": user["email"],
+        "balance": user["balance"],
+        "earnings": user["earnings"],
+        "total_invested": user["total_invested"],
+        "is_approved": user["is_approved"],
+        "is_admin": user["is_admin"],
+        "referral_link": f"{base_url}/register?ref={user['referral_code']}",
+        "last_bonus_time": user["last_bonus_time"]
+    }
+
 # -------------------- Startup Hook --------------------
 
 @app.on_event("startup")
 def ensure_admin_exists():
     data = load_data()
     if not any(user.get("is_admin") for user in data["users"]):
-        default_pw = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
-        admin_user = {
+        admin_pw = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+        admin = {
             "username": "admin",
-            "password": default_pw,
+            "password": admin_pw,
             "email": "",
             "registered_at": datetime.now().isoformat(),
             "is_approved": True,
@@ -282,6 +293,6 @@ def ensure_admin_exists():
             "referral_code": "",
             "referred_by": None
         }
-        data["users"].append(admin_user)
+        data["users"].append(admin)
         save_data(data)
-        print("Default admin created: username='admin', password='admin123'")
+        print("✅ Default admin created: username='admin', password='admin123'")
