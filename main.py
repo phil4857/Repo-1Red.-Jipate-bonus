@@ -6,7 +6,7 @@ import bcrypt, time
 
 app = FastAPI()
 
-# ---- CORS Configuration ----
+# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -20,16 +20,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---- In‑Memory Data Stores ----
+# In-memory storage
 users = {}
 investments = {}
-withdrawals = {}
 
-# ---- Admin Credentials ----
+# Admin credentials
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 
-# ---- Models ----
+# Models
 class User(BaseModel):
     username: str
     number: str
@@ -48,59 +47,52 @@ class Investment(BaseModel):
     approved: bool = False
     timestamp: datetime
 
-# ---- Utilities ----
-def hash_pwd(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-
-def check_pwd(pw: str, h: str) -> bool:
-    return bcrypt.checkpw(pw.encode(), h.encode())
+# Utils
+def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
 
 def admin_auth(username: str = Form(...), password: str = Form(...)):
     if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
-        raise HTTPException(403, "Invalid admin credentials")
+        raise HTTPException(status_code=403, detail="Invalid admin credentials")
     return True
 
-# ---- Routes ----
+# Routes
 
 @app.post("/register")
 def register(
     username: str = Form(...),
     number: str = Form(...),
     password: str = Form(...),
-    referral: str | None = Form(None),
+    referral: str | None = Form(None)
 ):
     if username in users:
         raise HTTPException(400, "Username already exists")
-    if len(password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
-    pwd_hash = hash_pwd(password)
+    password_hash = hash_pwd(password)
     users[username] = User(
         username=username,
         number=number,
-        password_hash=pwd_hash,
+        password_hash=password_hash,
         referral=referral
     ).dict()
     if referral and referral in users:
         users[referral]["referred_users"].append(username)
-    return {"message": f"User {username} registered. Await admin approval."}
+    return {"message": "Registration successful. Await admin approval."}
 
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        return {"message": "Admin logged in", "is_admin": True}
+        return {"message": "Admin login successful", "is_admin": True}
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
     if not u["approved"]:
-        raise HTTPException(403, "Account not yet approved")
-    return {"message": f"Welcome {username}", "is_admin": False}
+        raise HTTPException(403, "Account not yet approved by admin")
+    return {"message": "Login successful", "is_admin": False}
 
 @app.post("/invest")
 def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
     u = users.get(username)
-    if not u:
-        raise HTTPException(404, "User not found")
-    if not u["approved"]:
+    if not u or not u["approved"]:
         raise HTTPException(403, "Account not approved")
     if amount < 500:
         raise HTTPException(400, "Minimum investment is KES 500")
@@ -118,32 +110,28 @@ def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     if not u:
         raise HTTPException(404, "User not found")
     u["approved"] = True
-    return {"message": f"User {username} approved"}
+    return {"message": f"{username} approved successfully"}
 
 @app.post("/admin/approve_investment")
 def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
     inv = investments.get(username)
-    if not inv:
-        raise HTTPException(404, "Investment not found")
-    if inv["approved"]:
-        return {"message": "Already approved"}
+    if not inv or inv["approved"]:
+        if not inv:
+            raise HTTPException(404, "Investment not found")
+        return {"message": "Investment already approved"}
     inv["approved"] = True
     users[username]["balance"] += inv["amount"]
-    # referral bonus
     ref = users[username].get("referral")
     if ref in users:
         users[ref]["balance"] += inv["amount"] * 0.05
-        users[ref]["earnings"] += inv["amount"] * 0.05
     return {"message": f"Investment for {username} approved"}
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
     u = users.get(username)
-    if not u:
-        raise HTTPException(404, "User not found")
     inv = investments.get(username)
-    if not inv or not inv["approved"]:
-        raise HTTPException(400, "No approved investment")
+    if not u or not inv or not inv["approved"]:
+        raise HTTPException(400, "No approved investment found")
     now = time.time()
     if now - u["last_earning_time"] < 86400:
         raise HTTPException(400, "Bonus already claimed today")
@@ -151,10 +139,18 @@ def grab_bonus(username: str = Form(...)):
     u["balance"] += bonus
     u["earnings"] += bonus
     u["last_earning_time"] = now
+    return {"message": f"Bonus of KES {bonus:.2f} credited", "bonus": bonus}
+
+@app.get("/dashboard")
+def dashboard(username: str):
+    u = users.get(username)
+    if not u:
+        raise HTTPException(404, "User not found")
     return {
-        "message": f"Daily bonus of KES {bonus:.2f} credited",
-        "bonus": bonus,
-        "balance": u["balance"]
+        "username": u["username"],
+        "balance": u["balance"],
+        "earnings": u["earnings"],
+        "last_bonus_time": datetime.fromtimestamp(u["last_earning_time"]).isoformat()
     }
 
 @app.get("/user/{username}")
@@ -163,12 +159,12 @@ def get_user(username: str):
     if not u:
         raise HTTPException(404, "User not found")
     return {
-        "username": username,
+        "username": u["username"],
         "number": u["number"],
-        "approved": u["approved"],
         "balance": u["balance"],
         "earnings": u["earnings"],
         "last_bonus_time": datetime.fromtimestamp(u["last_earning_time"]).isoformat(),
+        "approved": u["approved"],
         "referral": u["referral"],
         "referred_users": u["referred_users"],
         "total_invested": investments.get(username, {}).get("amount", 0)
@@ -184,28 +180,17 @@ def referrals(username: str):
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     u = users.get(username)
+    inv = investments.get(username)
     if not u:
         raise HTTPException(404, "User not found")
-    # only Mondays
     if datetime.today().weekday() != 0:
-        raise HTTPException(400, "Withdrawals only on Mondays")
-    inv = investments.get(username)
+        raise HTTPException(400, "Withdrawals allowed only on Mondays")
     if not inv or not inv["approved"]:
-        raise HTTPException(400, "No approved investment")
+        raise HTTPException(400, "No approved investment found")
     min_req = 0.3 * inv["amount"]
     if amount < min_req:
-        raise HTTPException(400, f"Minimum withdrawal is 30%: KES {min_req:.2f}")
+        raise HTTPException(400, f"Minimum withdrawal is 30% of investment: KES {min_req:.2f}")
     if u["balance"] < amount:
         raise HTTPException(400, "Insufficient balance")
-    # queue for admin approval
-    withdrawals.setdefault(username, []).append({"amount": amount, "timestamp": datetime.now()})
-    return {"message": f"Withdrawal KES {amount:.2f} requested. Await admin approval."}
-
-@app.post("/admin/approve_withdrawal")
-def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth)):
-    w_list = withdrawals.get(username, [])
-    if not w_list:
-        raise HTTPException(404, "No pending withdrawals")
-    req = w_list.pop(0)
-    users[username]["balance"] -= req["amount"]
-    return {"message": f"Processed withdrawal of KES {req['amount']:.2f} for {username}"}
+    u["balance"] -= amount
+    return {"message": f"Withdrawal request of KES {amount:.2f} received"}
