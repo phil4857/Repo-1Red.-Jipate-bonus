@@ -11,6 +11,7 @@ app = FastAPI()
 DATA_FILE = 'data.json'
 
 # -------------------- Utility Functions --------------------
+
 def load_data():
     if not os.path.exists(DATA_FILE):
         init_data = {"users": [], "investments": [], "withdrawals": []}
@@ -36,6 +37,7 @@ def is_monday():
     return datetime.now().weekday() == 0
 
 # -------------------- Pydantic Models --------------------
+
 class AuthInput(BaseModel):
     username: str
     password: str
@@ -70,7 +72,6 @@ async def register(data_in: RegisterInput, request: Request):
     data = load_data()
     if find_user(data, data_in.username):
         raise HTTPException(status_code=400, detail="Username already exists")
-    
     ref_user = find_user_by_referral(data, data_in.ref) if data_in.ref else None
     pw_hash = bcrypt.hashpw(data_in.password.encode(), bcrypt.gensalt()).decode()
     new_user = {
@@ -103,6 +104,19 @@ async def login(data_in: AuthInput):
         "is_admin": user["is_admin"]
     }
 
+@app.post("/admin/login")
+async def admin_login(data_in: AuthInput):
+    data = load_data()
+    user = find_user(data, data_in.username)
+    if not user or not user.get("is_admin"):
+        raise HTTPException(status_code=401, detail="Admin not found or not authorized")
+    if not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {
+        "message": "Admin login successful",
+        "is_admin": user["is_admin"]
+    }
+
 @app.post("/invest")
 async def create_investment(data_in: InvestmentInput):
     data = load_data()
@@ -111,10 +125,8 @@ async def create_investment(data_in: InvestmentInput):
         raise HTTPException(status_code=401, detail="Authentication failed")
     if not user["is_approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
-
     if data_in.amount <= 0:
         raise HTTPException(status_code=400, detail="Amount must be positive")
-
     investment = {
         "id": len(data["investments"]) + 1,
         "user": data_in.username,
@@ -131,13 +143,11 @@ async def approve_investment(payload: AdminApproveInput):
     admin = find_user(data, payload.admin_username)
     if not admin or not bcrypt.checkpw(payload.admin_password.encode(), admin['password'].encode()) or not admin.get("is_admin"):
         raise HTTPException(status_code=401, detail="Admin authentication failed")
-    
     investment = find_investment(data, payload.investment_id)
     if not investment:
         raise HTTPException(status_code=404, detail="Investment not found")
     if investment["is_approved"]:
         raise HTTPException(status_code=400, detail="Already approved")
-
     investment["is_approved"] = True
     user = find_user(data, investment["user"])
     if user:
@@ -147,7 +157,6 @@ async def approve_investment(payload: AdminApproveInput):
         if ref and ref.get("is_approved"):
             ref["balance"] += 50.0
             ref["earnings"] += 50.0
-
     save_data(data)
     return {"message": "Investment approved and credited"}
 
@@ -159,13 +168,11 @@ async def daily_bonus(data_in: AuthInput):
         raise HTTPException(status_code=401, detail="Authentication failed")
     if not user["is_approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
-
     now = datetime.now()
     if user["last_bonus_time"]:
         last = datetime.fromisoformat(user["last_bonus_time"])
         if (now - last) < timedelta(hours=24):
             raise HTTPException(status_code=400, detail="Bonus already claimed")
-
     bonus = 0.1 * user["balance"]
     user["balance"] += bonus
     user["earnings"] += bonus
@@ -179,7 +186,6 @@ async def profile(data_in: AuthInput, request: Request):
     user = find_user(data, data_in.username)
     if not user or not bcrypt.checkpw(data_in.password.encode(), user['password'].encode()):
         raise HTTPException(status_code=401, detail="Authentication failed")
-    
     base_url = str(request.base_url).rstrip("/")
     return {
         "username": user["username"],
@@ -201,13 +207,11 @@ async def withdraw(data_in: WithdrawInput):
         raise HTTPException(status_code=403, detail="Account not approved")
     if data_in.amount <= 0 or data_in.amount > user["balance"]:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
-
     min_withdraw = 0.3 * user["total_invested"]
     if data_in.amount < min_withdraw:
         raise HTTPException(status_code=400, detail=f"Minimum withdrawal is {min_withdraw:.2f}")
     if not is_monday():
         raise HTTPException(status_code=400, detail="Withdrawals only allowed on Mondays")
-
     user["balance"] -= data_in.amount
     data["withdrawals"].append({
         "id": len(data["withdrawals"]) + 1,
@@ -247,6 +251,7 @@ async def reset_password(payload: ResetPasswordInput):
     return {"message": f"Password for {payload.username} has been reset"}
 
 # -------------------- Startup Hook --------------------
+
 @app.on_event("startup")
 def ensure_admin_exists():
     data = load_data()
