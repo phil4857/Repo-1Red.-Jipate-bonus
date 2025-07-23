@@ -1,17 +1,14 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import json
-import os
+import json, os, bcrypt
 from datetime import datetime, timedelta
-import bcrypt
 
 app = FastAPI()
 
-# Allow frontend CORS (update domain in production)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with frontend URL in production
+    allow_origins=["*"],  # Replace with your frontend origin in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -19,13 +16,13 @@ app.add_middleware(
 
 DATA_FILE = 'data.json'
 
-# -------------------- Utility Functions --------------------
+# ------------------ Utility Functions ------------------
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        init_data = {"users": [], "investments": [], "withdrawals": []}
+        data = {"users": [], "investments": [], "withdrawals": []}
         with open(DATA_FILE, 'w') as f:
-            json.dump(init_data, f, indent=4)
+            json.dump(data, f, indent=4)
     with open(DATA_FILE, 'r') as f:
         return json.load(f)
 
@@ -34,18 +31,18 @@ def save_data(data):
         json.dump(data, f, indent=4)
 
 def find_user(data, username):
-    return next((u for u in data['users'] if u['username'] == username), None)
+    return next((u for u in data["users"] if u["username"] == username), None)
 
 def find_user_by_referral(data, ref_code):
-    return next((u for u in data['users'] if u.get('referral_code') == ref_code), None)
+    return next((u for u in data["users"] if u.get("referral_code") == ref_code), None)
 
 def find_investment(data, invest_id):
-    return next((i for i in data['investments'] if i['id'] == invest_id), None)
+    return next((i for i in data["investments"] if i["id"] == invest_id), None)
 
 def is_monday():
     return datetime.now().weekday() == 0
 
-# -------------------- Models --------------------
+# ------------------ Models ------------------
 
 class AuthInput(BaseModel):
     username: str
@@ -58,11 +55,6 @@ class RegisterInput(AuthInput):
 class InvestmentInput(AuthInput):
     amount: float
 
-class AdminApproveInput(BaseModel):
-    admin_username: str
-    admin_password: str
-    investment_id: int
-
 class WithdrawInput(InvestmentInput): pass
 
 class ApproveUserInput(BaseModel):
@@ -73,14 +65,43 @@ class ApproveUserInput(BaseModel):
 class ResetPasswordInput(ApproveUserInput):
     new_password: str
 
-# -------------------- Routes --------------------
+class AdminApproveInput(BaseModel):
+    admin_username: str
+    admin_password: str
+    investment_id: int
+
+# ------------------ Startup ------------------
+
+@app.on_event("startup")
+def ensure_admin_exists():
+    data = load_data()
+    if not any(user.get("is_admin") for user in data["users"]):
+        hashed_pw = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+        admin = {
+            "username": "admin",
+            "password": hashed_pw,
+            "email": "",
+            "registered_at": datetime.now().isoformat(),
+            "is_approved": True,
+            "is_admin": True,
+            "balance": 0.0,
+            "earnings": 0.0,
+            "total_invested": 0.0,
+            "last_bonus_time": None,
+            "referral_code": "",
+            "referred_by": None
+        }
+        data["users"].append(admin)
+        save_data(data)
+        print("✅ Admin created: username='admin', password='admin123'")
+
+# ------------------ Routes ------------------
 
 @app.post("/register")
 def register(payload: RegisterInput):
     data = load_data()
     if find_user(data, payload.username):
         raise HTTPException(status_code=400, detail="Username already exists")
-
     ref_user = find_user_by_referral(data, payload.ref) if payload.ref else None
     password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
 
@@ -120,13 +141,10 @@ def admin_login(payload: AuthInput):
     data = load_data()
     user = find_user(data, payload.username)
     if not user or not user.get("is_admin"):
-        raise HTTPException(status_code=401, detail="Admin not found or not authorized")
+        raise HTTPException(status_code=403, detail="Access denied")
     if not bcrypt.checkpw(payload.password.encode(), user["password"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {
-        "message": "Admin login successful",
-        "is_admin": True
-    }
+    return {"message": "Admin login successful", "is_admin": True}
 
 @app.post("/invest")
 def create_investment(payload: InvestmentInput):
@@ -271,28 +289,3 @@ def profile(payload: AuthInput, request: Request):
         "referral_link": f"{base_url}/register?ref={user['referral_code']}",
         "last_bonus_time": user["last_bonus_time"]
     }
-
-# -------------------- Startup Hook --------------------
-
-@app.on_event("startup")
-def ensure_admin_exists():
-    data = load_data()
-    if not any(user.get("is_admin") for user in data["users"]):
-        admin_pw = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
-        admin = {
-            "username": "admin",
-            "password": admin_pw,
-            "email": "",
-            "registered_at": datetime.now().isoformat(),
-            "is_approved": True,
-            "is_admin": True,
-            "balance": 0.0,
-            "earnings": 0.0,
-            "total_invested": 0.0,
-            "last_bonus_time": None,
-            "referral_code": "",
-            "referred_by": None
-        }
-        data["users"].append(admin)
-        save_data(data)
-        print("✅ Default admin created: username='admin', password='admin123'")
