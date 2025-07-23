@@ -2,7 +2,7 @@
   "users": [
     {
       "username": "admin",
-      "password": "$2b$12$9lSxj7Tc4Rv7X07XAXPi1OFDciTDJoRGyo1rSnwKURo4NqVfDN2.q",
+      "password": "$2b$12$e3qABMsTmU09rbrz3F2V7eXuxqU9KpQTSI3kFFtLMHXQExaeIRm8i",
       "email": "",
       "registered_at": "2024-01-01T00:00:00",
       "is_approved": true,
