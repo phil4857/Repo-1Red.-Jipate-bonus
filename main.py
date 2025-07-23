@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import json
@@ -7,6 +8,15 @@ from datetime import datetime, timedelta
 import bcrypt
 
 app = FastAPI()
+
+# Enable CORS to prevent fetch errors
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with frontend domain in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DATA_FILE = 'data.json'
 
@@ -178,7 +188,7 @@ async def daily_bonus(data_in: AuthInput):
     user["earnings"] += bonus
     user["last_bonus_time"] = now.isoformat()
     save_data(data)
-    return {"message": f"Daily bonus of {bonus:.2f} credited"}
+    return {"message": f"Daily bonus of {bonus:.2f} credited", "bonus": bonus}
 
 @app.post("/profile")
 async def profile(data_in: AuthInput, request: Request):
@@ -194,6 +204,8 @@ async def profile(data_in: AuthInput, request: Request):
         "earnings": user["earnings"],
         "total_invested": user["total_invested"],
         "is_approved": user["is_approved"],
+        "is_admin": user["is_admin"],  # <-- front-end can use this to hide/show admin panel
+        "last_bonus_time": user.get("last_bonus_time"),
         "referral_link": f"{base_url}/register?ref={user.get('referral_code')}"
     }
 
