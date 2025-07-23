@@ -2,16 +2,16 @@
   "users": [
     {
       "username": "admin",
-      "password": "$2b$12$Zr2f3ttTS8E3WJMyD.5WDOojEmhLWhZuEjNad7R03VEGfcsijopV6",
+      "password": "$2b$12$9lSxj7Tc4Rv7X07XAXPi1OFDciTDJoRGyo1rSnwKURo4NqVfDN2.q",
       "email": "",
-      "registered_at": "2025-01-01T00:00:00",
+      "registered_at": "2024-01-01T00:00:00",
       "is_approved": true,
       "is_admin": true,
       "balance": 0.0,
       "earnings": 0.0,
       "total_invested": 0.0,
       "last_bonus_time": null,
-      "referral_code": "defaultadmin",
+      "referral_code": "",
       "referred_by": null
     }
   ],
