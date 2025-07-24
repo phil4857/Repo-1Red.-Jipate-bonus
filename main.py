@@ -6,21 +6,16 @@ import bcrypt, time
 
 app = FastAPI()
 
-# CORS Setup
+# CORS Setup — Dev: Allow all, Prod: whitelist
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "https://jipate-bonus-v1-bcti.vercel.app",
-        "https://repo-1red-jipate-bonus.onrender.com"
-    ],
+    allow_origins=["*"],  # Change this to specific origins in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory storage
+# In-memory storage (temp use only — use DB for prod)
 users = {}
 investments = {}
 withdrawals = {}
@@ -54,7 +49,7 @@ class WithdrawalRequest(BaseModel):
     approved: bool = False
     timestamp: datetime
 
-# Utilities
+# Utility functions
 def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
 
@@ -63,10 +58,21 @@ def admin_auth(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=403, detail="Invalid admin credentials")
     return True
 
+# ✅ Optional OTP stub route (for frontend integration testing)
+@app.post("/send_otp")
+def send_otp(number: str = Form(...)):
+    # No actual SMS service — just stub response
+    return {"message": f"OTP sent to {number}"}
+
 # Routes
 
 @app.post("/register")
-def register(username: str = Form(...), number: str = Form(...), password: str = Form(...), referral: str | None = Form(None)):
+def register(
+    username: str = Form(...),
+    number: str = Form(...),
+    password: str = Form(...),
+    referral: str | None = Form(None)
+):
     if username in users:
         raise HTTPException(400, "Username already exists")
     password_hash = hash_pwd(password)
