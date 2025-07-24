@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException, Depends, Request
+from fastapi import FastAPI, Form, HTTPException, Depends, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
@@ -53,10 +53,13 @@ class WithdrawalRequest(BaseModel):
 def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
 
-# Dependency for admin-protected routes
-def admin_auth(username: str = Form(...), password: str = Form(...)):
-    if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=403, detail="Invalid admin credentials")
+# 🔐 FIXED: Admin token-based dependency
+def admin_auth(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    token = authorization.split(" ")[1]
+    if token != "admin_static_token":
+        raise HTTPException(status_code=403, detail="Invalid admin token")
     return True
 
 # Stub OTP endpoint
