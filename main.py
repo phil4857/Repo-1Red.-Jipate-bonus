@@ -7,21 +7,20 @@ import time
 
 app = FastAPI()
 
-# Allow all origins during development
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to specific origins in production
+    allow_origins=["*"],  # Replace with specific frontend origin in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory data stores
+# In-memory data
 users = {}
 investments = {}
 withdrawals = {}
 
-# Admin credentials
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 
@@ -50,17 +49,17 @@ class WithdrawalRequest(BaseModel):
     approved: bool = False
     timestamp: datetime
 
-# Utility functions
+# Utilities
 def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
 
-# Dependency for admin-only endpoints
+# Dependency for admin-protected routes
 def admin_auth(username: str = Form(...), password: str = Form(...)):
     if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid admin credentials")
     return True
 
-# Optional OTP endpoint (stub)
+# Stub OTP endpoint
 @app.post("/send_otp")
 def send_otp(number: str = Form(...)):
     return {"message": f"OTP sent to {number}"}
@@ -68,14 +67,9 @@ def send_otp(number: str = Form(...)):
 # ---------------- USER ROUTES ----------------
 
 @app.post("/register")
-def register(
-    username: str = Form(...),
-    number: str = Form(...),
-    password: str = Form(...),
-    referral: str | None = Form(None)
-):
+def register(username: str = Form(...), number: str = Form(...), password: str = Form(...), referral: str | None = Form(None)):
     if username in users:
-        raise HTTPException(400, "Username already exists")
+        raise HTTPException(status_code=400, detail="Username already exists")
     password_hash = hash_pwd(password)
     users[username] = User(
         username=username,
@@ -93,9 +87,9 @@ def login(username: str = Form(...), password: str = Form(...)):
         return {"message": "Admin login successful", "is_admin": True, "is_approved": True}
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
-        raise HTTPException(401, "Invalid credentials")
-    if not u["approved"]:
-        raise HTTPException(403, "Account not yet approved by admin")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not u.get("approved", False):
+        raise HTTPException(status_code=403, detail="Account not yet approved by admin")
     return {
         "message": f"Login successful. Welcome {username}",
         "is_admin": False,
@@ -106,7 +100,7 @@ def login(username: str = Form(...), password: str = Form(...)):
 def dashboard(username: str):
     u = users.get(username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     return {
         "username": u["username"],
         "balance": u["balance"],
@@ -118,7 +112,8 @@ def dashboard(username: str):
 def get_user(username: str):
     u = users.get(username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
+    inv = investments.get(username)
     return {
         "username": u["username"],
         "number": u["number"],
@@ -128,16 +123,16 @@ def get_user(username: str):
         "approved": u["approved"],
         "referral": u["referral"],
         "referred_users": u["referred_users"],
-        "total_invested": investments.get(username, {}).get("amount", 0)
+        "total_invested": inv["amount"] if inv else 0
     }
 
 @app.post("/invest")
 def invest(username: str = Form(...), amount: float = Form(...), transaction_ref: str = Form(...)):
     u = users.get(username)
-    if not u or not u["approved"]:
-        raise HTTPException(403, "Account not approved")
+    if not u or not u.get("approved", False):
+        raise HTTPException(status_code=403, detail="Account not approved")
     if amount < 500:
-        raise HTTPException(400, "Minimum investment is KES 500")
+        raise HTTPException(status_code=400, detail="Minimum investment is KES 500")
     investments[username] = Investment(
         username=username,
         amount=amount,
@@ -150,32 +145,36 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
 def grab_bonus(username: str = Form(...)):
     u = users.get(username)
     inv = investments.get(username)
-    if not u or not inv or not inv["approved"]:
-        raise HTTPException(400, "No approved investment found")
+    if not u or not inv or not inv.get("approved", False):
+        raise HTTPException(status_code=400, detail="No approved investment found")
     now = time.time()
     if now - u["last_earning_time"] < 86400:
-        raise HTTPException(400, "Bonus already claimed today")
+        raise HTTPException(status_code=400, detail="Bonus already claimed today")
     bonus = inv["amount"] * 0.10
     u["balance"] += bonus
     u["earnings"] += bonus
     u["last_earning_time"] = now
-    return {"message": f"Bonus of KES {bonus:.2f} credited", "bonus": bonus, "balance": u["balance"]}
+    return {
+        "message": f"Bonus of KES {bonus:.2f} credited",
+        "bonus": bonus,
+        "balance": u["balance"]
+    }
 
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     u = users.get(username)
     inv = investments.get(username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     if datetime.today().weekday() != 0:
-        raise HTTPException(400, "Withdrawals allowed only on Mondays")
-    if not inv or not inv["approved"]:
-        raise HTTPException(400, "No approved investment found")
+        raise HTTPException(status_code=400, detail="Withdrawals allowed only on Mondays")
+    if not inv or not inv.get("approved", False):
+        raise HTTPException(status_code=400, detail="No approved investment found")
     min_req = 0.3 * inv["amount"]
     if amount < min_req:
-        raise HTTPException(400, f"Minimum withdrawal is 30% of investment: KES {min_req:.2f}")
+        raise HTTPException(status_code=400, detail=f"Minimum withdrawal is 30% of investment: KES {min_req:.2f}")
     if u["balance"] < amount:
-        raise HTTPException(400, "Insufficient balance")
+        raise HTTPException(status_code=400, detail="Insufficient balance")
 
     withdrawals[username] = WithdrawalRequest(
         username=username,
@@ -188,7 +187,7 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
 def referrals(username: str):
     u = users.get(username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     return u["referred_users"]
 
 # ---------------- ADMIN ROUTES ----------------
@@ -196,9 +195,7 @@ def referrals(username: str):
 @app.post("/admin/login")
 async def admin_login(request: Request):
     data = await request.json()
-    username = data.get("username")
-    password = data.get("password")
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+    if data.get("username") == ADMIN_USERNAME and data.get("password") == ADMIN_PASSWORD:
         return {"token": "admin_static_token"}
     raise HTTPException(status_code=403, detail="Invalid admin credentials")
 
@@ -210,7 +207,7 @@ def get_all_users(_: bool = Depends(admin_auth)):
 def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     u["approved"] = True
     return {"message": f"User {username} approved successfully"}
 
@@ -218,13 +215,13 @@ def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
 def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
     inv = investments.get(username)
     if not inv:
-        raise HTTPException(404, "Investment not found")
+        raise HTTPException(status_code=404, detail="Investment not found")
     if inv["approved"]:
         return {"message": "Investment already approved"}
     inv["approved"] = True
     users[username]["balance"] += inv["amount"]
     ref = users[username].get("referral")
-    if ref in users:
+    if ref and ref in users:
         users[ref]["balance"] += inv["amount"] * 0.05
     return {"message": f"Investment for {username} approved"}
 
@@ -232,20 +229,16 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
 def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth)):
     w = withdrawals.get(username)
     if not w:
-        raise HTTPException(404, "Withdrawal request not found")
+        raise HTTPException(status_code=404, detail="Withdrawal request not found")
     if w["approved"]:
         return {"message": "Withdrawal already approved"}
     w["approved"] = True
     return {"message": f"Withdrawal of KES {w['amount']:.2f} for {username} approved"}
 
 @app.post("/admin/reset-password")
-def admin_reset_password(
-    target_username: str = Form(...),
-    new_password: str = Form(...),
-    _: bool = Depends(admin_auth)
-):
+def admin_reset_password(target_username: str = Form(...), new_password: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(target_username)
     if not u:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(status_code=404, detail="User not found")
     u["password_hash"] = hash_pwd(new_password)
     return {"message": f"Password for {target_username} reset successfully"}
