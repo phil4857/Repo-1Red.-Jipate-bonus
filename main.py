@@ -10,7 +10,7 @@ app = FastAPI()
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with specific frontend origin in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,7 +53,7 @@ class WithdrawalRequest(BaseModel):
 def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
 
-# 🔐 FIXED: Admin token-based dependency
+# Admin token-based dependency
 def admin_auth(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
@@ -62,7 +62,6 @@ def admin_auth(authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid admin token")
     return True
 
-# Stub OTP endpoint
 @app.post("/send_otp")
 def send_otp(number: str = Form(...)):
     return {"message": f"OTP sent to {number}"}
@@ -197,9 +196,19 @@ def referrals(username: str):
 
 @app.post("/admin/login")
 async def admin_login(request: Request):
-    data = await request.json()
-    if data.get("username") == ADMIN_USERNAME and data.get("password") == ADMIN_PASSWORD:
-        return {"token": "admin_static_token"}
+    try:
+        data = await request.json()
+        username = data.get("username")
+        password = data.get("password")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request format")
+
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        return {
+            "message": "Admin login successful",
+            "token": "admin_static_token"
+        }
+
     raise HTTPException(status_code=403, detail="Invalid admin credentials")
 
 @app.get("/admin/users")
