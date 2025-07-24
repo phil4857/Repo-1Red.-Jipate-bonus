@@ -195,20 +195,12 @@ def referrals(username: str):
 # ---------------- ADMIN ROUTES ----------------
 
 @app.post("/admin/login")
-async def admin_login(request: Request):
-    try:
-        data = await request.json()
-        username = data.get("username")
-        password = data.get("password")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid request format")
-
+def admin_login(username: str = Form(...), password: str = Form(...)):
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         return {
             "message": "Admin login successful",
             "token": "admin_static_token"
         }
-
     raise HTTPException(status_code=403, detail="Invalid admin credentials")
 
 @app.get("/admin/users")
