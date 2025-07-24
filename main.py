@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException, Depends
+from fastapi import FastAPI, Form, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage (temp use only — use DB for prod)
+# In-memory storage (temporary — use DB for production)
 users = {}
 investments = {}
 withdrawals = {}
@@ -58,13 +58,12 @@ def admin_auth(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=403, detail="Invalid admin credentials")
     return True
 
-# ✅ Optional OTP stub route (for frontend integration testing)
+# Optional OTP stub
 @app.post("/send_otp")
 def send_otp(number: str = Form(...)):
-    # No actual SMS service — just stub response
     return {"message": f"OTP sent to {number}"}
 
-# Routes
+# ------------------- User Routes -------------------
 
 @app.post("/register")
 def register(
@@ -111,28 +110,6 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
         timestamp=datetime.now()
     ).dict()
     return {"message": "Investment submitted. Await admin approval."}
-
-@app.post("/admin/approve_user")
-def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
-    u = users.get(username)
-    if not u:
-        raise HTTPException(404, "User not found")
-    u["approved"] = True
-    return {"message": f"User {username} approved successfully"}
-
-@app.post("/admin/approve_investment")
-def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
-    inv = investments.get(username)
-    if not inv:
-        raise HTTPException(404, "Investment not found")
-    if inv["approved"]:
-        return {"message": "Investment already approved"}
-    inv["approved"] = True
-    users[username]["balance"] += inv["amount"]
-    ref = users[username].get("referral")
-    if ref in users:
-        users[ref]["balance"] += inv["amount"] * 0.05
-    return {"message": f"Investment for {username} approved"}
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
@@ -208,6 +185,43 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     ).dict()
     return {"message": f"Withdrawal request of KES {amount:.2f} received. Pending admin approval."}
 
+# ------------------- Admin Routes -------------------
+
+@app.post("/admin/login")
+async def admin_login(request: Request):
+    data = await request.json()
+    username = data.get("username")
+    password = data.get("password")
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        return {"token": "admin_static_token"}
+    raise HTTPException(status_code=403, detail="Invalid admin credentials")
+
+@app.get("/admin/users")
+def get_all_users(_: bool = Depends(admin_auth)):
+    return list(users.values())
+
+@app.post("/admin/approve_user")
+def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
+    u = users.get(username)
+    if not u:
+        raise HTTPException(404, "User not found")
+    u["approved"] = True
+    return {"message": f"User {username} approved successfully"}
+
+@app.post("/admin/approve_investment")
+def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
+    inv = investments.get(username)
+    if not inv:
+        raise HTTPException(404, "Investment not found")
+    if inv["approved"]:
+        return {"message": "Investment already approved"}
+    inv["approved"] = True
+    users[username]["balance"] += inv["amount"]
+    ref = users[username].get("referral")
+    if ref in users:
+        users[ref]["balance"] += inv["amount"] * 0.05
+    return {"message": f"Investment for {username} approved"}
+
 @app.post("/admin/approve_withdrawal")
 def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth)):
     w = withdrawals.get(username)
@@ -217,3 +231,15 @@ def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth))
         return {"message": "Withdrawal already approved"}
     w["approved"] = True
     return {"message": f"Withdrawal of KES {w['amount']:.2f} for {username} approved"}
+
+@app.post("/admin/reset-password")
+def admin_reset_password(
+    target_username: str = Form(...),
+    new_password: str = Form(...),
+    _: bool = Depends(admin_auth)
+):
+    u = users.get(target_username)
+    if not u:
+        raise HTTPException(404, "User not found")
+    u["password_hash"] = hash_pwd(new_password)
+    return {"message": f"Password for {target_username} reset successfully"}
