@@ -22,6 +22,7 @@ withdrawals = {}
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 ADMIN_TOKEN = "admin_static_token"
+INVESTMENT_NUMBER = "0737734533"  # ✅ Centralized number
 
 class User(BaseModel):
     username: str
@@ -116,7 +117,8 @@ def dashboard(username: str):
         "bonus_message": bonus_message,
         "bonus_days_remaining": u["bonus_days_remaining"],
         "last_bonus_time": datetime.fromtimestamp(u["last_earning_time"]).isoformat() if u["last_earning_time"] else None,
-        "investment_amount": inv["amount"] if inv else 0
+        "investment_amount": inv["amount"] if inv else 0,
+        "investment_number": INVESTMENT_NUMBER  # ✅ Added
     }
 
 @app.post("/invest")
@@ -132,7 +134,10 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
         transaction_ref=transaction_ref,
         timestamp=datetime.now()
     ).dict()
-    return {"message": "Investment submitted. Await admin approval."}
+    return {
+        "message": "Investment submitted. Await admin approval.",
+        "investment_number": INVESTMENT_NUMBER  # ✅ Added
+    }
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
@@ -206,7 +211,8 @@ def get_all_users(_: bool = Depends(admin_auth)):
             "referral": u["referral"],
             "referred_users": u["referred_users"],
             "total_invested": inv["amount"] if inv else 0,
-            "investment_approved": inv["approved"] if inv else False
+            "investment_approved": inv["approved"] if inv else False,
+            "investment_number": INVESTMENT_NUMBER  # ✅ Added
         })
     return result
 
