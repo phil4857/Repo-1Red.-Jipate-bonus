@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In‑memory stores (swap out for DB in prod)
+# In-memory stores (swap out for DB in prod)
 users = {}
 investments = {}
 withdrawals = {}
@@ -24,6 +24,9 @@ withdrawals = {}
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 ADMIN_TOKEN = "admin_static_token"
+
+# Payment number for investments
+PAYMENT_NUMBER = "0737734566"
 
 # Models
 class User(BaseModel):
@@ -52,8 +55,11 @@ class WithdrawalRequest(BaseModel):
     timestamp: datetime
 
 # Utilities
-def hash_pwd(pw): return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
-def check_pwd(pw, h): return bcrypt.checkpw(pw.encode(), h.encode())
+def hash_pwd(pw):
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def check_pwd(pw, h):
+    return bcrypt.checkpw(pw.encode(), h.encode())
 
 # Admin auth via Bearer token
 def admin_auth(authorization: str = Header(None)):
@@ -84,7 +90,10 @@ def register(
     ).dict()
     if referral and referral in users:
         users[referral]["referred_users"].append(username)
-    return {"message": f"User {username} registered. Awaiting approval."}
+    return {
+        "message": f"User {username} registered. Awaiting approval.",
+        "payment_number": PAYMENT_NUMBER
+    }
 
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
@@ -136,9 +145,15 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
     if amount < 500:
         raise HTTPException(400, "Minimum investment is KES 500")
     investments[username] = Investment(
-        username=username, amount=amount, transaction_ref=transaction_ref, timestamp=datetime.now()
+        username=username,
+        amount=amount,
+        transaction_ref=transaction_ref,
+        timestamp=datetime.now()
     ).dict()
-    return {"message": "Investment submitted. Pending approval."}
+    return {
+        "message": "Investment submitted. Pending approval.",
+        "payment_number": PAYMENT_NUMBER
+    }
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
@@ -156,11 +171,17 @@ def grab_bonus(username: str = Form(...)):
     u["earnings"] += bonus
     u["last_earning_time"] = now
     u["bonus_days_remaining"] -= 1
-    return {"message": f"Bonus KES {bonus:.2f} credited", "bonus": bonus, "balance": u["balance"], "days_remaining": u["bonus_days_remaining"]}
+    return {
+        "message": f"Bonus KES {bonus:.2f} credited",
+        "bonus": bonus,
+        "balance": u["balance"],
+        "days_remaining": u["bonus_days_remaining"]
+    }
 
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
-    u = users.get(username); inv = investments.get(username)
+    u = users.get(username)
+    inv = investments.get(username)
     if not u:
         raise HTTPException(404, "User not found")
     if datetime.today().weekday() != 0:
@@ -193,7 +214,7 @@ def admin_login(username: str = Form(...), password: str = Form(...)):
 @app.get("/admin/users")
 def get_all_users(_: bool = Depends(admin_auth)):
     out = []
-    for uname,u in users.items():
+    for uname, u in users.items():
         inv = investments.get(uname)
         out.append({
             "username": u["username"],
@@ -211,14 +232,16 @@ def get_all_users(_: bool = Depends(admin_auth)):
 @app.post("/admin/approve_user")
 def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(username)
-    if not u: raise HTTPException(404, "User not found")
+    if not u:
+        raise HTTPException(404, "User not found")
     u["approved"] = True
     return {"message": f"User {username} approved"}
 
 @app.post("/admin/approve_investment")
 def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
     inv = investments.get(username)
-    if not inv: raise HTTPException(404, "Investment not found")
+    if not inv:
+        raise HTTPException(404, "Investment not found")
     if inv["approved"]:
         return {"message": "Already approved"}
     inv["approved"] = True
@@ -237,7 +260,8 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
 @app.post("/admin/approve_withdrawal")
 def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth)):
     w = withdrawals.get(username)
-    if not w: raise HTTPException(404, "Withdrawal not found")
+    if not w:
+        raise HTTPException(404, "Withdrawal not found")
     if w["approved"]:
         return {"message": "Already approved"}
     w["approved"] = True
@@ -246,6 +270,7 @@ def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth))
 @app.post("/admin/reset-password")
 def reset_password(target_username: str = Form(...), new_password: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(target_username)
-    if not u: raise HTTPException(404, "User not found")
+    if not u:
+        raise HTTPException(404, "User not found")
     u["password_hash"] = hash_pwd(new_password)
     return {"message": f"Password for {target_username} reset successfully"}
