@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Form, HTTPException, Depends, Request, Header
+from fastapi import FastAPI, Form, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from datetime import datetime
@@ -20,13 +20,14 @@ users = {}
 investments = {}
 withdrawals = {}
 
+# Platform config
+PLATFORM_NAME = "Mkoba Wallet"
+PAYMENT_NUMBER = "0739075065"
+
 # Admin credentials & token
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 ADMIN_TOKEN = "admin_static_token"
-
-# Payment number for investments
-PAYMENT_NUMBER = "0737734566"
 
 # Models
 class User(BaseModel):
@@ -92,6 +93,7 @@ def register(
         users[referral]["referred_users"].append(username)
     return {
         "message": f"User {username} registered. Awaiting approval.",
+        "platform": PLATFORM_NAME,
         "payment_number": PAYMENT_NUMBER
     }
 
@@ -134,7 +136,9 @@ def dashboard(username: str):
         "bonus_available": bonus_available,
         "bonus_message": bonus_message,
         "bonus_days_remaining": u["bonus_days_remaining"],
-        "last_bonus_time": datetime.fromtimestamp(u["last_earning_time"]).isoformat() if u["last_earning_time"] else None
+        "last_bonus_time": datetime.fromtimestamp(u["last_earning_time"]).isoformat() if u["last_earning_time"] else None,
+        "platform": PLATFORM_NAME,
+        "payment_number": PAYMENT_NUMBER
     }
 
 @app.post("/invest")
@@ -152,6 +156,7 @@ def invest(username: str = Form(...), amount: float = Form(...), transaction_ref
     ).dict()
     return {
         "message": "Investment submitted. Pending approval.",
+        "platform": PLATFORM_NAME,
         "payment_number": PAYMENT_NUMBER
     }
 
