@@ -9,13 +9,13 @@ app = FastAPI()
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # lock down in production
+    allow_origins=["*"],  # ⚠️ tighten this in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory stores (swap out for DB in prod)
+# In-memory stores (replace with DB in production)
 users = {}
 investments = {}
 withdrawals = {}
@@ -29,7 +29,7 @@ ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
 ADMIN_TOKEN = "admin_static_token"
 
-# Models
+# ---------------- Models ----------------
 class User(BaseModel):
     username: str
     number: str
@@ -55,7 +55,7 @@ class WithdrawalRequest(BaseModel):
     approved: bool = False
     timestamp: datetime
 
-# Utilities
+# ---------------- Utilities ----------------
 def hash_pwd(pw):
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
@@ -72,7 +72,6 @@ def admin_auth(authorization: str = Header(None)):
     return True
 
 # ---------------- User Routes ----------------
-
 @app.post("/register")
 def register(
     username: str = Form(...),
@@ -101,7 +100,12 @@ def register(
 def login(username: str = Form(...), password: str = Form(...)):
     # Admin login
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        return {"message": "Admin login successful", "is_admin": True, "is_approved": True}
+        return {
+            "message": "Admin login successful",
+            "is_admin": True,
+            "is_approved": True,
+            "token": ADMIN_TOKEN
+        }
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
@@ -115,7 +119,8 @@ def dashboard(username: str):
     inv = investments.get(username)
     if not u:
         raise HTTPException(404, "User not found")
-    # Determine bonus availability
+
+    # Bonus status
     bonus_available = False
     bonus_message = "No approved investment"
     if inv and inv["approved"]:
@@ -125,6 +130,7 @@ def dashboard(username: str):
             bonus_message = "Bonus available"
         else:
             bonus_message = "Already claimed or period ended"
+
     return {
         "username": u["username"],
         "balance": u["balance"],
@@ -170,12 +176,14 @@ def grab_bonus(username: str = Form(...)):
         raise HTTPException(400, "No bonus period left")
     now = time.time()
     if now - u["last_earning_time"] < 86400:
-        raise HTTPException(400, "Bonus claimed today")
+        raise HTTPException(400, "Bonus already claimed today")
+
     bonus = inv["amount"] * 0.10
     u["balance"] += bonus
     u["earnings"] += bonus
     u["last_earning_time"] = now
     u["bonus_days_remaining"] -= 1
+
     return {
         "message": f"Bonus KES {bonus:.2f} credited",
         "bonus": bonus,
@@ -189,7 +197,7 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     inv = investments.get(username)
     if not u:
         raise HTTPException(404, "User not found")
-    if datetime.today().weekday() != 0:
+    if datetime.today().weekday() != 0:  # Only on Mondays
         raise HTTPException(400, "Withdrawals only on Mondays")
     if not inv or not inv["approved"]:
         raise HTTPException(400, "No approved investment")
@@ -198,7 +206,12 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
         raise HTTPException(400, f"Minimum withdrawal is 30%: KES {min_req:.2f}")
     if u["balance"] < amount:
         raise HTTPException(400, "Insufficient balance")
-    withdrawals[username] = WithdrawalRequest(username=username, amount=amount, timestamp=datetime.now()).dict()
+
+    withdrawals[username] = WithdrawalRequest(
+        username=username,
+        amount=amount,
+        timestamp=datetime.now()
+    ).dict()
     return {"message": f"Withdrawal KES {amount:.2f} requested. Pending approval."}
 
 @app.get("/referrals/{username}")
@@ -209,7 +222,6 @@ def referrals(username: str):
     return u["referred_users"]
 
 # ---------------- Admin Routes ----------------
-
 @app.post("/admin/login")
 def admin_login(username: str = Form(...), password: str = Form(...)):
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
@@ -221,6 +233,7 @@ def get_all_users(_: bool = Depends(admin_auth)):
     out = []
     for uname, u in users.items():
         inv = investments.get(uname)
+        w = withdrawals.get(uname)
         out.append({
             "username": u["username"],
             "number": u["number"],
@@ -230,7 +243,8 @@ def get_all_users(_: bool = Depends(admin_auth)):
             "referral": u["referral"],
             "referred_users": u["referred_users"],
             "total_invested": inv["amount"] if inv else 0,
-            "investment_approved": inv["approved"] if inv else False
+            "investment_approved": inv["approved"] if inv else False,
+            "pending_withdrawal": w["amount"] if w and not w["approved"] else 0
         })
     return out
 
@@ -249,17 +263,22 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
         raise HTTPException(404, "Investment not found")
     if inv["approved"]:
         return {"message": "Already approved"}
+
     inv["approved"] = True
     u = users[username]
     amt = inv["amount"]
-    # credit principal
+
+    # Credit principal
     u["balance"] += amt
-    # set bonus period
+    # Set bonus period
     u["bonus_days_remaining"] = 30 if amt < 1000 else 60 if amt < 3000 else 90
-    # referral bonus
+
+    # Referral bonus
     ref = u["referral"]
     if ref in users:
         users[ref]["balance"] += amt * 0.05
+        users[ref]["earnings"] += amt * 0.05
+
     return {"message": f"Investment for {username} approved"}
 
 @app.post("/admin/approve_withdrawal")
@@ -269,6 +288,12 @@ def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth))
         raise HTTPException(404, "Withdrawal not found")
     if w["approved"]:
         return {"message": "Already approved"}
+
+    u = users[username]
+    if u["balance"] < w["amount"]:
+        raise HTTPException(400, "Insufficient balance to approve withdrawal")
+
+    u["balance"] -= w["amount"]
     w["approved"] = True
     return {"message": f"Withdrawal of KES {w['amount']:.2f} approved"}
 
