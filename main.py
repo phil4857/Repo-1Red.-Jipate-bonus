@@ -76,7 +76,7 @@ def admin_auth(authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid admin token")
     return True
 
-# ---------------- Platform info (used by dynamic admin/dashboard frontends) ----------------
+# ---------------- Platform info ----------------
 @app.get("/platform/info")
 def platform_info():
     return {"platform": PLATFORM_NAME, "payment_number": PAYMENT_NUMBER}
@@ -106,14 +106,8 @@ async def register(
         "payment_number": PAYMENT_NUMBER
     }
 
-# Accept both form-encoded and JSON bodies for login (robustness)
 @app.post("/login")
 async def login(request: Request):
-    """
-    Accepts either application/x-www-form-urlencoded or JSON body:
-      { "username": "...", "password": "..." }
-    For admin credentials returns an admin token (token included in response).
-    """
     data = {}
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -128,7 +122,6 @@ async def login(request: Request):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
 
-    # Admin login
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         return {
             "message": "Admin login successful",
@@ -143,7 +136,7 @@ async def login(request: Request):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not u.get("approved", False):
         raise HTTPException(status_code=403, detail="Account not yet approved")
-    # successful user login
+
     return {
         "message": f"Welcome {username}",
         "is_admin": False,
@@ -153,13 +146,9 @@ async def login(request: Request):
 
 @app.get("/user/{username}")
 def get_user(username: str):
-    """
-    Simple user endpoint (used by some frontends). Returns basic public user info.
-    """
     u = users.get(username)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    # return safe subset
     return {
         "username": u["username"],
         "number": u["number"],
@@ -179,7 +168,6 @@ def dashboard(username: str):
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Bonus status
     bonus_available = False
     bonus_message = "No approved investment"
     if inv and inv.get("approved", False):
@@ -206,7 +194,6 @@ def dashboard(username: str):
         "payment_number": PAYMENT_NUMBER
     }
 
-# Accept either JSON or form for invest to match various frontends
 @app.post("/invest")
 async def invest(request: Request):
     content_type = request.headers.get("content-type", "")
@@ -303,7 +290,6 @@ def referrals(username: str):
     return u.get("referred_users", [])
 
 # ---------------- Admin Routes ----------------
-# Admin login: accept both form and json
 @app.post("/admin/login")
 async def admin_login(request: Request):
     content_type = request.headers.get("content-type", "")
@@ -360,12 +346,9 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
     u = users[username]
     amt = inv["amount"]
 
-    # Credit principal
     u["balance"] += amt
-    # Set bonus period
     u["bonus_days_remaining"] = 30 if amt < 1000 else 60 if amt < 3000 else 90
 
-    # Referral bonus
     ref = u.get("referral")
     if ref in users:
         users[ref]["balance"] += amt * 0.05
@@ -396,3 +379,19 @@ def reset_password(target_username: str = Form(...), new_password: str = Form(..
         raise HTTPException(status_code=404, detail="User not found")
     u["password_hash"] = hash_pwd(new_password)
     return {"message": f"Password for {target_username} reset successfully"}
+
+# ---------------- NEW: Admin terminate user ----------------
+@app.post("/admin/terminate_user")
+def terminate_user(username: str = Form(...), _: bool = Depends(admin_auth)):
+    u = users.pop(username, None)
+    if not u:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Clean up related records
+    investments.pop(username, None)
+    withdrawals.pop(username, None)
+    for ref_u in users.values():
+        if username in ref_u.get("referred_users", []):
+            ref_u["referred_users"].remove(username)
+
+    return {"message": f"User {username} terminated successfully"}
