@@ -84,11 +84,23 @@ def platform_info():
 # ---------------- User Routes ----------------
 @app.post("/register")
 async def register(
+    request: Request,
     username: str = Form(...),
     number: str = Form(...),
     password: str = Form(...),
     referral: Optional[str] = Form(None),
 ):
+    """
+    Register a new user.
+
+    Referral may be provided either as a form field `referral` (old behavior)
+    or via the query string `?ref=username` (allows referral links like
+    /register.html?ref=alice to work if the frontend posts without a referral field).
+    """
+    # allow query param 'ref' to provide referral link support
+    if not referral:
+        referral = request.query_params.get("ref")  # new: read referral from ?ref=
+
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
     pw_hash = hash_pwd(password)
