@@ -3,35 +3,36 @@ from fastapi import FastAPI, Form, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime
-import bcrypt, time
+import bcrypt, time, secrets
 from typing import Optional, Dict, Any
 
 app = FastAPI()
 
-# CORS setup
+# ------------------- CORS SETUP -------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # ⚠️ tighten this in production
+    allow_origins=["https://jipate-bonus-v1.vercel.app"],  # ✅ Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory stores (replace with DB in production)
+# ------------------- IN-MEMORY STORAGE -------------------
 users: Dict[str, Dict[str, Any]] = {}
 investments: Dict[str, Dict[str, Any]] = {}
 withdrawals: Dict[str, Dict[str, Any]] = {}
 
-# Platform config
+# ------------------- PLATFORM CONFIG -------------------
 PLATFORM_NAME = "Mkoba Wallet"
 PAYMENT_NUMBER = "0739075065"
 
-# Admin credentials & token (simple static for demo)
+# ------------------- ADMIN AUTH -------------------
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin4857"
-ADMIN_TOKEN = "admin_static_token"
+ADMIN_TOKEN = "admin_static_token"  # legacy static token
+ADMIN_TOKENS: Dict[str, float] = {}  # dynamic session tokens
 
-# ---------------- Models ----------------
+# ------------------- MODELS -------------------
 class User(BaseModel):
     username: str
     number: str
@@ -44,6 +45,7 @@ class User(BaseModel):
     last_earning_time: float = 0.0
     bonus_days_remaining: int = 0
 
+
 class Investment(BaseModel):
     username: str
     amount: float
@@ -51,15 +53,18 @@ class Investment(BaseModel):
     approved: bool = False
     timestamp: datetime
 
+
 class WithdrawalRequest(BaseModel):
     username: str
     amount: float
     approved: bool = False
     timestamp: datetime
 
-# ---------------- Utilities ----------------
+
+# ------------------- UTILITIES -------------------
 def hash_pwd(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
 
 def check_pwd(pw: str, h: str) -> bool:
     try:
@@ -67,21 +72,29 @@ def check_pwd(pw: str, h: str) -> bool:
     except Exception:
         return False
 
-# Admin auth via Bearer token
+
 def admin_auth(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = authorization.split()[1]
-    if token != ADMIN_TOKEN:
+    # Accept static or dynamic token
+    if token != ADMIN_TOKEN and token not in ADMIN_TOKENS:
         raise HTTPException(status_code=403, detail="Invalid admin token")
     return True
 
-# ---------------- Platform info ----------------
+
+# ------------------- BASIC ROUTES -------------------
+@app.get("/health")
+def health():
+    return {"status": "ok", "timestamp": time.time()}
+
+
 @app.get("/platform/info")
 def platform_info():
     return {"platform": PLATFORM_NAME, "payment_number": PAYMENT_NUMBER}
 
-# ---------------- User Routes ----------------
+
+# ------------------- USER ROUTES -------------------
 @app.post("/register")
 async def register(
     request: Request,
@@ -90,19 +103,13 @@ async def register(
     password: str = Form(...),
     referral: Optional[str] = Form(None),
 ):
-    """
-    Register a new user.
-
-    Referral may be provided either as a form field `referral` (old behavior)
-    or via the query string `?ref=username` (allows referral links like
-    /register.html?ref=alice to work if the frontend posts without a referral field).
-    """
-    # allow query param 'ref' to provide referral link support
+    """Register new user; referral can be ?ref=username."""
     if not referral:
-        referral = request.query_params.get("ref")  # new: read referral from ?ref=
+        referral = request.query_params.get("ref")
 
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
+
     pw_hash = hash_pwd(password)
     users[username] = User(
         username=username,
@@ -110,13 +117,16 @@ async def register(
         password_hash=pw_hash,
         referral=referral
     ).dict()
+
     if referral and referral in users:
         users[referral]["referred_users"].append(username)
+
     return {
         "message": f"User {username} registered. Awaiting approval.",
         "platform": PLATFORM_NAME,
         "payment_number": PAYMENT_NUMBER
     }
+
 
 @app.post("/login")
 async def login(request: Request):
@@ -134,12 +144,15 @@ async def login(request: Request):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
 
+    # Admin login
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        token = secrets.token_hex(16)
+        ADMIN_TOKENS[token] = time.time()
         return {
             "message": "Admin login successful",
             "is_admin": True,
             "is_approved": True,
-            "token": ADMIN_TOKEN,
+            "token": token,
             "username": ADMIN_USERNAME
         }
 
@@ -155,6 +168,7 @@ async def login(request: Request):
         "is_approved": True,
         "username": username
     }
+
 
 @app.get("/user/{username}")
 def get_user(username: str):
@@ -172,6 +186,7 @@ def get_user(username: str):
         "bonus_days_remaining": u.get("bonus_days_remaining", 0),
         "last_earning_time": u.get("last_earning_time", 0)
     }
+
 
 @app.get("/dashboard")
 def dashboard(username: str):
@@ -205,6 +220,7 @@ def dashboard(username: str):
         "platform": PLATFORM_NAME,
         "payment_number": PAYMENT_NUMBER
     }
+
 
 @app.post("/invest")
 async def invest(request: Request):
@@ -246,6 +262,7 @@ async def invest(request: Request):
         "payment_number": PAYMENT_NUMBER
     }
 
+
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
     u = users.get(username)
@@ -271,13 +288,14 @@ def grab_bonus(username: str = Form(...)):
         "days_remaining": u["bonus_days_remaining"]
     }
 
+
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
     u = users.get(username)
     inv = investments.get(username)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    if datetime.today().weekday() != 0:  # Only on Mondays
+    if datetime.today().weekday() != 0:
         raise HTTPException(status_code=400, detail="Withdrawals only on Mondays")
     if not inv or not inv.get("approved", False):
         raise HTTPException(status_code=400, detail="No approved investment")
@@ -294,6 +312,7 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     ).dict()
     return {"message": f"Withdrawal KES {amount:.2f} requested. Pending approval."}
 
+
 @app.get("/referrals/{username}")
 def referrals(username: str):
     u = users.get(username)
@@ -301,22 +320,13 @@ def referrals(username: str):
         raise HTTPException(status_code=404, detail="User not found")
     return u.get("referred_users", [])
 
-# ---------------- Admin Routes ----------------
-@app.post("/admin/login")
-async def admin_login(request: Request):
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        body = await request.json()
-        username = body.get("username")
-        password = body.get("password")
-    else:
-        form = await request.form()
-        username = form.get("username")
-        password = form.get("password")
 
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        return {"message": "Admin login successful", "token": ADMIN_TOKEN}
-    raise HTTPException(status_code=403, detail="Invalid admin credentials")
+# ------------------- ADMIN ROUTES -------------------
+@app.get("/admin/validate")
+def validate_admin(_: bool = Depends(admin_auth)):
+    """Simple admin token validator."""
+    return {"valid": True}
+
 
 @app.get("/admin/users")
 def get_all_users(_: bool = Depends(admin_auth)):
@@ -338,6 +348,7 @@ def get_all_users(_: bool = Depends(admin_auth)):
         })
     return out
 
+
 @app.post("/admin/approve_user")
 def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(username)
@@ -345,6 +356,7 @@ def approve_user(username: str = Form(...), _: bool = Depends(admin_auth)):
         raise HTTPException(status_code=404, detail="User not found")
     u["approved"] = True
     return {"message": f"User {username} approved"}
+
 
 @app.post("/admin/approve_investment")
 def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth)):
@@ -368,6 +380,7 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
 
     return {"message": f"Investment for {username} approved"}
 
+
 @app.post("/admin/approve_withdrawal")
 def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth)):
     w = withdrawals.get(username)
@@ -384,6 +397,7 @@ def approve_withdrawal(username: str = Form(...), _: bool = Depends(admin_auth))
     w["approved"] = True
     return {"message": f"Withdrawal of KES {w['amount']:.2f} approved"}
 
+
 @app.post("/admin/reset-password")
 def reset_password(target_username: str = Form(...), new_password: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.get(target_username)
@@ -392,7 +406,7 @@ def reset_password(target_username: str = Form(...), new_password: str = Form(..
     u["password_hash"] = hash_pwd(new_password)
     return {"message": f"Password for {target_username} reset successfully"}
 
-# ---------------- NEW: Admin terminate user ----------------
+
 @app.post("/admin/terminate_user")
 def terminate_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.pop(username, None)
