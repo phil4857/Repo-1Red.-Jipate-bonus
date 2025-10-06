@@ -42,8 +42,8 @@ class User(BaseModel):
     referral: Optional[str] = None
     referred_users: list[str] = Field(default_factory=list)
     balance: float = 0.0            # withdrawable funds (earnings/referral bonuses)
-    earnings: float = 0.0          # cumulative earnings (for display)
-    principal: float = 0.0         # invested principal (NOT withdrawable)
+    earnings: float = 0.0           # cumulative earnings (for display)
+    principal: float = 0.0          # invested principal (NOT withdrawable)
     last_earning_time: float = 0.0
     bonus_days_remaining: int = 0
 
@@ -80,12 +80,13 @@ def prune_admin_tokens():
 def admin_auth(authorization: str = Header(None)):
     """
     Accept either the static ADMIN_TOKEN or any token present in ADMIN_TOKENS (and not expired).
+    Called as a Depends(...) in admin endpoints.
     """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = authorization.split()[1]
 
-    # static token allowed (legacy)
+    # static token allowed (legacy) — keep for compatibility (consider removing in production)
     if token == ADMIN_TOKEN:
         return True
 
@@ -116,6 +117,7 @@ async def register(
     referral: Optional[str] = Form(None),
 ):
     """Register new user. Supports ?ref=username links."""
+    # allow referral via query string for referral links (/register?ref=alice)
     if not referral:
         referral = request.query_params.get("ref")
 
@@ -141,7 +143,7 @@ async def register(
 
 @app.post("/login")
 async def login(request: Request):
-    """User or Admin login."""
+    """User or Admin login. Admin receives a short-lived dynamic token."""
     data = {}
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -158,6 +160,7 @@ async def login(request: Request):
 
     # --- Admin login ---
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        # generate short-lived token
         token = secrets.token_hex(16)
         ADMIN_TOKENS[token] = time.time()
         return {
@@ -168,7 +171,7 @@ async def login(request: Request):
             "username": ADMIN_USERNAME
         }
 
-    # --- Normal user ---
+    # --- Normal user login ---
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -190,9 +193,9 @@ def get_user(username: str):
     return {
         "username": u["username"],
         "number": u["number"],
-        "balance": u.get("balance", 0.0),
+        "balance": u.get("balance", 0.0),        # withdrawable (earnings)
         "earnings": u.get("earnings", 0.0),
-        "principal": u.get("principal", 0.0),
+        "principal": u.get("principal", 0.0),    # invested principal (unwithdrawable)
         "approved": u.get("approved", False),
         "referral": u.get("referral"),
         "referred_users": u.get("referred_users", []),
@@ -273,7 +276,7 @@ async def invest(request: Request):
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
-    """User claims daily 10% bonus."""
+    """User claims daily 10% bonus. Bonus goes to withdrawable balance and earnings (for display)."""
     u = users.get(username)
     inv = investments.get(username)
     if not u or not inv or not inv.get("approved", False):
@@ -294,7 +297,7 @@ def grab_bonus(username: str = Form(...)):
 
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
-    """User requests withdrawal (Mondays only)."""
+    """User requests withdrawal (Mondays only). Withdraws from withdrawable balance only."""
     u = users.get(username)
     inv = investments.get(username)
     if not u:
@@ -307,10 +310,16 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     min_req = 0.3 * inv["amount"]
     if amount < min_req:
         raise HTTPException(status_code=400, detail=f"Minimum withdrawal is 30%: KES {min_req:.2f}")
+
+    # Withdraw only from user's withdrawable balance (earnings/referral bonuses).
     if u["balance"] < amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    withdrawals[username] = WithdrawalRequest(username=username, amount=amount, timestamp=datetime.now()).dict()
+    withdrawals[username] = WithdrawalRequest(
+        username=username,
+        amount=amount,
+        timestamp=datetime.now()
+    ).dict()
     return {"message": f"Withdrawal KES {amount:.2f} requested. Pending approval."}
 
 @app.get("/referrals/{username}")
@@ -323,20 +332,22 @@ def referrals(username: str):
 # ------------------- ADMIN ROUTES -------------------
 @app.get("/admin/validate")
 def validate_admin(_: bool = Depends(admin_auth)):
-    """Frontend token validation."""
+    """Simple admin token validator for frontends."""
     return {"valid": True}
 
 @app.post("/admin/logout")
 def admin_logout(authorization: str = Header(None)):
-    """Invalidate token when admin logs out."""
+    """Invalidate the provided admin token (if dynamic)."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = authorization.split()[1]
+    # Remove dynamic token if present
     if token in ADMIN_TOKENS:
         ADMIN_TOKENS.pop(token, None)
         return {"message": "Logged out"}
+    # static token: return ok but nothing to remove
     if token == ADMIN_TOKEN:
-        return {"message": "Logged out (static token ignored)"}
+        return {"message": "Logged out (static token ignored server-side)"}
     raise HTTPException(status_code=403, detail="Invalid admin token")
 
 @app.get("/admin/users")
@@ -380,10 +391,13 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
     u = users[username]
     amt = inv["amount"]
 
-    # principal = locked investment
+    # principal = locked investment (unwithdrawable)
     u["principal"] = u.get("principal", 0.0) + amt
+
+    # Set bonus period
     u["bonus_days_remaining"] = 30 if amt < 1000 else 60 if amt < 3000 else 90
 
+    # Referral bonus (withdrawable)
     ref = u.get("referral")
     if ref in users:
         users[ref]["balance"] += amt * 0.05
@@ -420,26 +434,36 @@ def terminate_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.pop(username, None)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
+
     investments.pop(username, None)
     withdrawals.pop(username, None)
     for ref_u in users.values():
         if username in ref_u.get("referred_users", []):
             ref_u["referred_users"].remove(username)
+
     return {"message": f"User {username} terminated successfully"}
+
 @app.post("/admin/refresh")
 def admin_refresh(authorization: str = Header(None)):
-    """Refresh admin token expiry (extend session without full re-login)."""
+    """
+    Refresh admin token: takes a valid dynamic token and replaces it with a new token.
+    Returns the new token. If static ADMIN_TOKEN is used, returns info note.
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
 
-    token = authorization.split()[1]
+    old_token = authorization.split()[1]
     prune_admin_tokens()
 
-    if token in ADMIN_TOKENS:
-        ADMIN_TOKENS[token] = time.time()  # reset timestamp
-        return {"message": "Admin token refreshed", "token": token}
+    # If dynamic token present, replace it with a new one and extend TTL
+    if old_token in ADMIN_TOKENS:
+        # remove old and issue new token
+        ADMIN_TOKENS.pop(old_token, None)
+        new_token = secrets.token_hex(16)
+        ADMIN_TOKENS[new_token] = time.time()
+        return {"message": "Admin token refreshed", "token": new_token}
 
-    if token == ADMIN_TOKEN:
+    if old_token == ADMIN_TOKEN:
         return {"message": "Static admin token does not require refresh"}
 
     raise HTTPException(status_code=403, detail="Invalid or expired admin token")
