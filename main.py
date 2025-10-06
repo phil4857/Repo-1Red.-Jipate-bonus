@@ -115,10 +115,7 @@ async def register(
     password: str = Form(...),
     referral: Optional[str] = Form(None),
 ):
-    """
-    Register new user.
-    Referral may be provided as a form field `referral` or via the query param `?ref=`.
-    """
+    """Register new user. Supports ?ref=username links."""
     if not referral:
         referral = request.query_params.get("ref")
 
@@ -144,6 +141,7 @@ async def register(
 
 @app.post("/login")
 async def login(request: Request):
+    """User or Admin login."""
     data = {}
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -158,9 +156,8 @@ async def login(request: Request):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
 
-    # Admin login -> issue dynamic token
+    # --- Admin login ---
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        # generate single-use short-lived token
         token = secrets.token_hex(16)
         ADMIN_TOKENS[token] = time.time()
         return {
@@ -171,6 +168,7 @@ async def login(request: Request):
             "username": ADMIN_USERNAME
         }
 
+    # --- Normal user ---
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -192,9 +190,9 @@ def get_user(username: str):
     return {
         "username": u["username"],
         "number": u["number"],
-        "balance": u.get("balance", 0.0),        # withdrawable (earnings)
+        "balance": u.get("balance", 0.0),
         "earnings": u.get("earnings", 0.0),
-        "principal": u.get("principal", 0.0),    # invested principal (unwithdrawable)
+        "principal": u.get("principal", 0.0),
         "approved": u.get("approved", False),
         "referral": u.get("referral"),
         "referred_users": u.get("referred_users", []),
@@ -238,6 +236,7 @@ def dashboard(username: str):
 
 @app.post("/invest")
 async def invest(request: Request):
+    """User submits investment request."""
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         body = await request.json()
@@ -270,14 +269,11 @@ async def invest(request: Request):
         transaction_ref=transaction_ref or f"tx-{int(time.time())}",
         timestamp=datetime.now()
     ).dict()
-    return {
-        "message": "Investment submitted. Pending approval.",
-        "platform": PLATFORM_NAME,
-        "payment_number": PAYMENT_NUMBER
-    }
+    return {"message": "Investment submitted. Pending approval."}
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
+    """User claims daily 10% bonus."""
     u = users.get(username)
     inv = investments.get(username)
     if not u or not inv or not inv.get("approved", False):
@@ -289,26 +285,20 @@ def grab_bonus(username: str = Form(...)):
         raise HTTPException(status_code=400, detail="Bonus already claimed today")
 
     bonus = inv["amount"] * 0.10
-    # bonus is earnings: goes to both balance (withdrawable) and earnings (for display)
     u["balance"] += bonus
     u["earnings"] += bonus
     u["last_earning_time"] = now
     u["bonus_days_remaining"] -= 1
 
-    return {
-        "message": f"Bonus KES {bonus:.2f} credited",
-        "bonus": bonus,
-        "balance": u["balance"],
-        "days_remaining": u["bonus_days_remaining"]
-    }
+    return {"message": f"Bonus KES {bonus:.2f} credited", "bonus": bonus, "balance": u["balance"], "days_remaining": u["bonus_days_remaining"]}
 
 @app.post("/withdraw")
 def withdraw(username: str = Form(...), amount: float = Form(...)):
+    """User requests withdrawal (Mondays only)."""
     u = users.get(username)
     inv = investments.get(username)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-    # withdrawals only allowed on Mondays (as before)
     if datetime.today().weekday() != 0:
         raise HTTPException(status_code=400, detail="Withdrawals only on Mondays")
     if not inv or not inv.get("approved", False):
@@ -317,16 +307,10 @@ def withdraw(username: str = Form(...), amount: float = Form(...)):
     min_req = 0.3 * inv["amount"]
     if amount < min_req:
         raise HTTPException(status_code=400, detail=f"Minimum withdrawal is 30%: KES {min_req:.2f}")
-
-    # Withdraw only from user's withdrawable balance (earnings/referral bonuses).
     if u["balance"] < amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    withdrawals[username] = WithdrawalRequest(
-        username=username,
-        amount=amount,
-        timestamp=datetime.now()
-    ).dict()
+    withdrawals[username] = WithdrawalRequest(username=username, amount=amount, timestamp=datetime.now()).dict()
     return {"message": f"Withdrawal KES {amount:.2f} requested. Pending approval."}
 
 @app.get("/referrals/{username}")
@@ -339,22 +323,20 @@ def referrals(username: str):
 # ------------------- ADMIN ROUTES -------------------
 @app.get("/admin/validate")
 def validate_admin(_: bool = Depends(admin_auth)):
-    """Simple admin token validator for frontends."""
+    """Frontend token validation."""
     return {"valid": True}
 
 @app.post("/admin/logout")
 def admin_logout(authorization: str = Header(None)):
-    """Invalidate the provided admin token (if dynamic)."""
+    """Invalidate token when admin logs out."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid token")
     token = authorization.split()[1]
-    # Remove dynamic token if present
     if token in ADMIN_TOKENS:
         ADMIN_TOKENS.pop(token, None)
         return {"message": "Logged out"}
-    # allow static token logout response for completeness
     if token == ADMIN_TOKEN:
-        return {"message": "Logged out (static token ignored server-side)"}
+        return {"message": "Logged out (static token ignored)"}
     raise HTTPException(status_code=403, detail="Invalid admin token")
 
 @app.get("/admin/users")
@@ -398,13 +380,10 @@ def approve_investment(username: str = Form(...), _: bool = Depends(admin_auth))
     u = users[username]
     amt = inv["amount"]
 
-    # **Important change**: keep invested principal separate and unwithdrawable.
+    # principal = locked investment
     u["principal"] = u.get("principal", 0.0) + amt
-
-    # Set bonus period
     u["bonus_days_remaining"] = 30 if amt < 1000 else 60 if amt < 3000 else 90
 
-    # Referral bonus (still goes to referral's balance and earnings - withdrawable)
     ref = u.get("referral")
     if ref in users:
         users[ref]["balance"] += amt * 0.05
@@ -441,12 +420,9 @@ def terminate_user(username: str = Form(...), _: bool = Depends(admin_auth)):
     u = users.pop(username, None)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-
-    # Clean up related records
     investments.pop(username, None)
     withdrawals.pop(username, None)
     for ref_u in users.values():
         if username in ref_u.get("referred_users", []):
             ref_u["referred_users"].remove(username)
-
     return {"message": f"User {username} terminated successfully"}
