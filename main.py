@@ -426,3 +426,20 @@ def terminate_user(username: str = Form(...), _: bool = Depends(admin_auth)):
         if username in ref_u.get("referred_users", []):
             ref_u["referred_users"].remove(username)
     return {"message": f"User {username} terminated successfully"}
+@app.post("/admin/refresh")
+def admin_refresh(authorization: str = Header(None)):
+    """Refresh admin token expiry (extend session without full re-login)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+
+    token = authorization.split()[1]
+    prune_admin_tokens()
+
+    if token in ADMIN_TOKENS:
+        ADMIN_TOKENS[token] = time.time()  # reset timestamp
+        return {"message": "Admin token refreshed", "token": token}
+
+    if token == ADMIN_TOKEN:
+        return {"message": "Static admin token does not require refresh"}
+
+    raise HTTPException(status_code=403, detail="Invalid or expired admin token")
