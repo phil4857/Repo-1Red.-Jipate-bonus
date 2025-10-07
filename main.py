@@ -1,10 +1,9 @@
-# main.py
 from fastapi import FastAPI, Form, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, Dict, Any
-import bcrypt, time, secrets
+import bcrypt, time, secrets, os
 
 app = FastAPI()
 
@@ -27,8 +26,8 @@ PLATFORM_NAME = "Mkoba Wallet"
 PAYMENT_NUMBER = "0739075065"
 
 # ------------------- ADMIN CONFIG -------------------
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin4857"
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin4857")
 ADMIN_TOKEN = "admin_static_token"
 ADMIN_TOKENS: Dict[str, float] = {}
 ADMIN_TOKEN_TTL = 600  # seconds (10 min)
@@ -137,6 +136,7 @@ async def login(request: Request):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing credentials")
 
+    # ---- Admin Login ----
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         token = secrets.token_hex(16)
         ADMIN_TOKENS[token] = time.time()
@@ -147,6 +147,7 @@ async def login(request: Request):
             "username": ADMIN_USERNAME,
         }
 
+    # ---- User Login ----
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -164,10 +165,12 @@ async def admin_login(request: Request):
 
     username = data.get("username")
     password = data.get("password")
+
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         token = secrets.token_hex(16)
         ADMIN_TOKENS[token] = time.time()
         return {"message": "Admin login successful", "token": token}
+
     raise HTTPException(status_code=403, detail="Invalid admin credentials")
 
 @app.get("/user/{username}")
