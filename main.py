@@ -1,103 +1,107 @@
 # main.py
 """
-FastAPI app with:
- - User registration + Twilio OTP verification
- - Private server-side admin SMS alert on registration
- - Hidden developer/admin route (path comes from ADMIN_PATH_TOKEN) - returns 404 to outsiders
- - Admin endpoints protected by ADMIN_SECRET header or admin tokens, but always return 404 on unauthorized access
- - In-memory storage (same approach you had previously). Swap to a DB in production.
+FastAPI backend for Mkoba Wallet (user + hidden admin).
 
-Environment variables expected:
- - TWILIO_SID
- - TWILIO_AUTH_TOKEN
- - TWILIO_FROM    (E.164 like +1XXXXXXXXXX)
- - ADMIN_ALERT_NUMBER  (E.164, e.g. +254748066116)
- - ADMIN_PATH_TOKEN    (e.g. 9fa83b27)  => dev route becomes /dev-9fa83b27-panel
- - ADMIN_SECRET        (string used in X-ADMIN-SECRET header to view the dev admin)
- - ADMIN_USERNAME
- - ADMIN_PASSWORD
- - ADMIN_TOKEN_TTL (seconds, optional; default 600)
+Features:
+- User registration with Twilio OTP (server-side admin alert on registration).
+- No STK/payment integration (removed).
+- Admin endpoints secured: require admin token or X-ADMIN-SECRET header.
+  Unauthorized requests return 404 to hide admin endpoints.
+- Admin token issuance and refresh (simple in-memory token store).
+- Endpoints aligned to the frontend you've provided:
+  - Public user endpoints: /register, /verify-otp, /login, /dashboard, /invest, /bonus/grab, /platform/info
+  - Admin endpoints: /admin/* (and mirrored under /dev-<ADMIN_PATH_TOKEN>-panel/*)
+Environment variables (recommended in .env):
+- TWILIO_SID
+- TWILIO_AUTH_TOKEN
+- TWILIO_FROM
+- ADMIN_ALERT_NUMBER (e.g. +254748066116)
+- ADMIN_PATH_TOKEN (e.g. 9fa83b27)
+- ADMIN_SECRET (long secret used in X-ADMIN-SECRET header)
+- ADMIN_USERNAME
+- ADMIN_PASSWORD
+- ADMIN_TOKEN_TTL (seconds; default 600)
 """
 
-from fastapi import FastAPI, Form, HTTPException, Depends, Header, Request, status
+import os
+import time
+import secrets
+import logging
+from typing import Dict, Any, Optional, List
+from datetime import datetime
+
+from fastapi import FastAPI, Request, Form, Header, HTTPException, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-import bcrypt, time, secrets, os, logging
 
-# Optional: load .env in development (pip install python-dotenv)
+# Optional: load .env in development
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
 
-# Twilio
+# Twilio (optional)
 try:
     from twilio.rest import Client as TwilioClient
 except Exception:
-    TwilioClient = None  # If Twilio not installed, SMS sending will be a no-op but logged.
+    TwilioClient = None
 
-# ----- App setup -----
-app = FastAPI(title="Mkoba Wallet - Backend (with OTP & hidden admin)")
+# ---- App ----
+app = FastAPI(title="Mkoba Wallet Backend (with OTP & hidden admin)")
 
-# CORS - allow all during testing; restrict in prod
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten to your frontend domain in production
+    allow_origins=["*"],  # tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ----- In-memory storage -----
-users: Dict[str, Dict[str, Any]] = {}            # username -> User dict
-investments: Dict[str, Dict[str, Any]] = {}      # username -> pending Investment dict
-withdrawals: Dict[str, Dict[str, Any]] = {}      # username -> WithdrawalRequest dict
-otps: Dict[str, Dict[str, Any]] = {}             # username -> {"otp": "123456", "expires_at": timestamp}
+# ---- Logging ----
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mkoba-backend")
 
-# ----- Platform config -----
+# ---- In-memory stores (swap to a real DB in production) ----
+users: Dict[str, Dict[str, Any]] = {}          # username -> user dict
+investments: Dict[str, Dict[str, Any]] = {}    # username -> pending investment dict
+withdrawals: Dict[str, Dict[str, Any]] = {}    # username -> pending withdrawal dict
+otps: Dict[str, Dict[str, Any]] = {}           # username -> {"otp": "123456", "expires_at": ts}
+
+# ---- Config (env) ----
 PLATFORM_NAME = os.getenv("PLATFORM_NAME", "Mkoba Wallet")
 PAYMENT_NUMBER = os.getenv("PAYMENT_NUMBER", "0739075065")
 
-# ----- Admin config -----
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin4857")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "admin_static_token")  # legacy static (kept for compatibility)
 
-ADMIN_TOKENS: Dict[str, float] = {}  # token -> issued_time
-ADMIN_TOKEN_TTL = int(os.getenv("ADMIN_TOKEN_TTL", "600"))  # seconds
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "admin_static_token")  # legacy static token
+ADMIN_TOKENS: Dict[str, float] = {}  # token -> issued_time (seconds)
+ADMIN_TOKEN_TTL = int(os.getenv("ADMIN_TOKEN_TTL", "600"))
 
 ADMIN_PATH_TOKEN = os.getenv("ADMIN_PATH_TOKEN", secrets.token_hex(4))  # short random if not provided
-# Dev/admin path is: /dev-<ADMIN_PATH_TOKEN>-panel
-ADMIN_ROUTE_PREFIX = f"dev-{ADMIN_PATH_TOKEN}-panel"  # used to create hidden dev/admin endpoints
+ADMIN_ROUTE_PREFIX = f"dev-{ADMIN_PATH_TOKEN}-panel"  # optional hidden path prefix
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", secrets.token_hex(12))  # header secret for dev access
+ADMIN_ALERT_NUMBER = os.getenv("ADMIN_ALERT_NUMBER", None)
 
-ADMIN_SECRET = os.getenv("ADMIN_SECRET", secrets.token_hex(12))  # header secret required to see the dev panel
-ADMIN_ALERT_NUMBER = os.getenv("ADMIN_ALERT_NUMBER", None)  # e.g. +254748066116
-
-# Twilio config
-TWILIO_SID = os.getenv("TWILIO_SID", None)
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", None)
-TWILIO_FROM = os.getenv("TWILIO_FROM", None)  # E.164 format, e.g. +1xxx
+# Twilio
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_FROM")
 
 # OTP config
 OTP_LENGTH = int(os.getenv("OTP_LENGTH", "6"))
 OTP_TTL_SECONDS = int(os.getenv("OTP_TTL_SECONDS", "300"))  # 5 minutes
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mkoba-backend")
-
-
-# ----- Models -----
+# ---- Models ----
 class User(BaseModel):
     username: str
     number: str
     password_hash: str
     approved: bool = False
     referral: Optional[str] = None
-    referred_users: list[str] = Field(default_factory=list)
+    referred_users: List[str] = Field(default_factory=list)
     balance: float = 0.0
     earnings: float = 0.0
     principal: float = 0.0
@@ -113,60 +117,44 @@ class Investment(BaseModel):
     timestamp: datetime
 
 
-class WithdrawalRequest(BaseModel):
-    username: str
-    amount: float
-    approved: bool = False
-    timestamp: datetime
-
-
-# ----- Utilities -----
+# ---- Helpers ----
 def hash_pwd(pw: str) -> str:
+    import bcrypt
+
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 
 def check_pwd(pw: str, hashed: str) -> bool:
+    import bcrypt
+
     try:
         return bcrypt.checkpw(pw.encode(), hashed.encode())
     except Exception:
         return False
 
 
-def prune_admin_tokens():
-    """Remove expired admin tokens."""
-    now = time.time()
-    expired = [t for t, ts in list(ADMIN_TOKENS.items()) if now - ts > ADMIN_TOKEN_TTL]
-    for t in expired:
-        ADMIN_TOKENS.pop(t, None)
-
-
 def send_sms(to_number: str, message: str):
     """
-    Sends an SMS via Twilio if configured. Otherwise logs it.
-    This function is server-side only; nothing is returned to the user that indicates an admin notification was sent.
+    Send SMS using Twilio if configured. Otherwise, log as a mock.
+    This is server-side only; the user never learns about admin notifications via frontend.
     """
     if not (TWILIO_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM and TwilioClient):
         logger.info(f"[SMS MOCK] To: {to_number} | Message: {message}")
         return
-
     try:
         client = TwilioClient(TWILIO_SID, TWILIO_AUTH_TOKEN)
-        # Twilio expects E.164 phone numbers
         client.messages.create(body=message, from_=TWILIO_FROM, to=to_number)
-        logger.info(f"SMS sent to {to_number}")
+        logger.info(f"Sent SMS to {to_number}")
     except Exception as e:
-        logger.exception(f"Failed to send SMS to {to_number}: {e}")
+        logger.exception("Failed to send SMS: %s", e)
 
 
 def generate_otp(length: int = OTP_LENGTH) -> str:
-    """Generate a numeric OTP of given length."""
     return "".join(secrets.choice("0123456789") for _ in range(length))
 
 
 def store_otp_for_user(username: str, otp: str):
-    expires_at = time.time() + OTP_TTL_SECONDS
-    otps[username] = {"otp": otp, "expires_at": expires_at}
-    logger.debug(f"Stored OTP for {username}, expires_at={expires_at}")
+    otps[username] = {"otp": otp, "expires_at": time.time() + OTP_TTL_SECONDS}
 
 
 def verify_otp_for_user(username: str, otp: str) -> bool:
@@ -182,50 +170,50 @@ def verify_otp_for_user(username: str, otp: str) -> bool:
     return False
 
 
-def notify_admin_of_registration(username: str, number: str):
-    """Server-side admin notification on registration. Not exposed to users."""
-    admin_number = ADMIN_ALERT_NUMBER or PAYMENT_NUMBER
-    if not admin_number:
-        logger.info("No ADMIN_ALERT_NUMBER configured; skipping admin notification.")
-        return
-    msg = f"New user registered: {username} ({number})"
-    try:
-        send_sms(admin_number, msg)
-    except Exception as e:
-        logger.exception("Failed to send admin registration SMS: %s", e)
+def prune_admin_tokens():
+    now = time.time()
+    expired = [t for t, ts in list(ADMIN_TOKENS.items()) if now - ts > ADMIN_TOKEN_TTL]
+    for t in expired:
+        ADMIN_TOKENS.pop(t, None)
 
 
-# ----- Hidden admin auth dependency -----
-def admin_auth(x_admin_secret: Optional[str] = Header(None), authorization: Optional[str] = Header(None)):
+def issue_admin_token() -> str:
+    token = secrets.token_hex(16)
+    ADMIN_TOKENS[token] = time.time()
+    return token
+
+
+# ---- Admin auth dependency (hides existence by returning 404) ----
+def admin_auth(authorization: Optional[str] = Header(None), x_admin_secret: Optional[str] = Header(None)):
     """
-    Admin auth dependency for hidden admin endpoints.
-    IMPORTANT: To keep admin routes invisible, unauthorized requests get a 404 (Not Found) rather than 401/403.
-    Valid access methods:
-      - Include header X-ADMIN-SECRET matching ADMIN_SECRET (developer secret)
-      - OR include Authorization: Bearer <token> where token is in ADMIN_TOKENS and not expired
+    Accept either:
+     - Authorization: Bearer <token> where token in ADMIN_TOKENS or token == ADMIN_TOKEN
+     - OR X-ADMIN-SECRET header matching ADMIN_SECRET (developer)
+    Otherwise raise 404 to hide endpoints.
     """
-    # Accept developer secret header first
+    # developer header first
     if x_admin_secret and x_admin_secret == ADMIN_SECRET:
         return True
 
-    # Try bearer token
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split()[1]
-        # static token allowed
-        if token == ADMIN_TOKEN:
-            return True
-        prune_admin_tokens()
-        if token in ADMIN_TOKENS:
-            return True
+    if not authorization or not authorization.startswith("Bearer "):
+        # hide
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    token = authorization.split()[1]
+    if token == ADMIN_TOKEN:
+        return True
+    prune_admin_tokens()
+    if token in ADMIN_TOKENS:
+        # optionally refresh TTL timestamp here if you want sliding expiry
+        return True
 
-    # To hide admin existence, return 404 for unauthorized
+    # hide existence
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
 
 
-# ----- Basic routes -----
+# ---- Public endpoints ----
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": time.time()}
+    return {"status": "ok", "ts": time.time()}
 
 
 @app.get("/platform/info")
@@ -233,7 +221,6 @@ def platform_info():
     return {"platform": PLATFORM_NAME, "payment_number": PAYMENT_NUMBER}
 
 
-# ----- User routes -----
 @app.post("/register")
 async def register(
     request: Request,
@@ -242,47 +229,44 @@ async def register(
     password: str = Form(...),
     referral: Optional[str] = Form(None),
 ):
-    """
-    Register a user. Immediately triggers OTP SMS to the user's phone and a private admin alert SMS.
-    The user must then call /verify-otp to activate (approved=True).
-    """
-    # referral via query param also allowed
+    # allow ?ref=... on URL
     if not referral:
         referral = request.query_params.get("ref")
 
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    pw_hash = hash_pwd(password)
+    pwd_hash = hash_pwd(password)
     users[username] = User(
         username=username,
         number=number,
-        password_hash=pw_hash,
+        password_hash=pwd_hash,
         referral=referral,
     ).dict()
 
-    # Add referral relationship
+    # referral link
     if referral and referral in users:
         users[referral]["referred_users"].append(username)
 
-    # Generate and send OTP to user
+    # create OTP and send to user
     otp = generate_otp()
     store_otp_for_user(username, otp)
-    user_msg = f"Your {PLATFORM_NAME} verification code is: {otp}. It expires in {OTP_TTL_SECONDS // 60} minutes."
+    user_msg = f"Your {PLATFORM_NAME} verification code is: {otp}. Expires in {OTP_TTL_SECONDS // 60} minutes."
     try:
         send_sms(number, user_msg)
-    except Exception as e:
-        logger.exception("Failed to send OTP SMS to user %s: %s", username, e)
-
-    # Private admin notification (server-side only)
-    try:
-        notify_admin_of_registration(username, number)
     except Exception:
-        logger.exception("Admin notification failed for %s", username)
+        logger.exception("Failed sending OTP to user %s", username)
 
-    # Return generic response (no hint of admin notification)
+    # server-side admin notification (private)
+    try:
+        admin_target = ADMIN_ALERT_NUMBER or PAYMENT_NUMBER
+        admin_msg = f"New user registered: {username} ({number})"
+        send_sms(admin_target, admin_msg)
+    except Exception:
+        logger.exception("Failed admin alert for %s", username)
+
     return {
-        "message": f"User {username} registered. An OTP was sent to the provided number.",
+        "message": f"User {username} registered. OTP sent to provided number.",
         "platform": PLATFORM_NAME,
         "payment_number": PAYMENT_NUMBER,
     }
@@ -290,24 +274,21 @@ async def register(
 
 @app.post("/verify-otp")
 def verify_otp(username: str = Form(...), otp: str = Form(...)):
-    """
-    Verify OTP for a username. If valid, mark user.approved = True so they can start earning/investing.
-    """
     u = users.get(username)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
-
     if verify_otp_for_user(username, otp):
         u["approved"] = True
-        return {"message": "OTP verified. Account approved.", "username": username}
+        return {"message": "OTP verified. Account approved."}
     raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
 
 @app.post("/login")
 async def login(request: Request):
     """
-    Shared login endpoint for users.
-    Admin login is available only via the hidden dev admin login endpoint (below).
+    Shared login: used by both user and admin frontends.
+    If credentials match admin config, return is_admin=True + token.
+    Otherwise authenticate normal user.
     """
     content_type = (request.headers.get("content-type") or "")
     if "application/json" in content_type:
@@ -321,46 +302,48 @@ async def login(request: Request):
     if not username or not password:
         raise HTTPException(status_code=400, detail="Missing username or password")
 
-    # Normal user login
+    # admin login
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        token = issue_admin_token()
+        return {"message": "Admin login successful", "is_admin": True, "token": token, "username": ADMIN_USERNAME}
+
+    # normal user login
     u = users.get(username)
     if not u or not check_pwd(password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not u.get("approved", False):
         raise HTTPException(status_code=403, detail="Account not yet approved")
-
-    return {
-        "message": f"Welcome {username}",
-        "is_admin": False,
-        "is_approved": True,
-        "username": username,
-    }
+    return {"message": f"Welcome {username}", "is_admin": False, "username": username, "is_approved": True}
 
 
-@app.get("/user/{username}")
-def get_user(username: str):
+@app.get("/dashboard")
+def dashboard(username: str):
     u = users.get(username)
     if not u:
         raise HTTPException(status_code=404, detail="User not found")
+    inv = investments.get(username)
+    investment_amount = inv["amount"] if inv and inv.get("approved", False) else 0.0
+    bonus_available = False
+    bonus_message = "No bonus available"
+    if inv and inv.get("approved", False):
+        now = time.time()
+        last = u.get("last_earning_time", 0)
+        if u.get("bonus_days_remaining", 0) > 0 and (now - last) >= 86400:
+            bonus_available = True
+            bonus_message = f"Grab your daily 10% bonus! ({u['bonus_days_remaining']} days left)"
     return {
         "username": u["username"],
-        "number": u["number"],
         "balance": u.get("balance", 0.0),
         "earnings": u.get("earnings", 0.0),
-        "principal": u.get("principal", 0.0),
+        "investment_amount": investment_amount,
+        "bonus_available": bonus_available,
+        "bonus_message": bonus_message,
         "approved": u.get("approved", False),
-        "referral": u.get("referral"),
-        "referred_users": u.get("referred_users", []),
-        "bonus_days_remaining": u.get("bonus_days_remaining", 0),
-        "last_earning_time": u.get("last_earning_time", 0),
     }
 
 
 @app.post("/invest")
 async def invest(request: Request):
-    """
-    Create a pending investment. Admin must approve later (admin approves via hidden panel).
-    This keeps your original flow: do NOT move principal here.
-    """
     content_type = (request.headers.get("content-type") or "")
     if "application/json" in content_type:
         body = await request.json()
@@ -375,15 +358,12 @@ async def invest(request: Request):
 
     if username is None or amount is None:
         raise HTTPException(status_code=400, detail="username and amount required")
-
     try:
         amount = float(amount)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid amount")
-
     if amount < 500:
         raise HTTPException(status_code=400, detail="Minimum investment is KES 500")
-
     u = users.get(username)
     if not u or not u.get("approved", False):
         raise HTTPException(status_code=403, detail="Account not approved")
@@ -392,22 +372,14 @@ async def invest(request: Request):
         username=username,
         amount=amount,
         transaction_ref=tx_ref or f"tx-{int(time.time())}",
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     ).dict()
 
-    return {
-        "message": "Investment submitted. Pending approval.",
-        "platform": PLATFORM_NAME,
-        "payment_number": PAYMENT_NUMBER
-    }
+    return {"message": "Investment submitted. Pending approval.", "platform": PLATFORM_NAME, "payment_number": PAYMENT_NUMBER}
 
 
 @app.post("/bonus/grab")
 def grab_bonus(username: str = Form(...)):
-    """
-    User claims daily bonus. Requires an approved investment.
-    Bonus = 10% of invested amount. Bonus goes to withdrawable balance and earnings.
-    """
     u = users.get(username)
     inv = investments.get(username)
     if not u or not inv or not inv.get("approved", False):
@@ -417,112 +389,48 @@ def grab_bonus(username: str = Form(...)):
     now = time.time()
     if now - u["last_earning_time"] < 86400:
         raise HTTPException(status_code=400, detail="Bonus already claimed today")
-
     bonus = inv["amount"] * 0.10
     u["balance"] = u.get("balance", 0.0) + bonus
     u["earnings"] = u.get("earnings", 0.0) + bonus
     u["last_earning_time"] = now
     u["bonus_days_remaining"] = u.get("bonus_days_remaining", 0) - 1
-
     return {"message": f"Bonus KES {bonus:.2f} credited"}
 
 
-# ----- Hidden developer/admin routes -----
-# These endpoints are intentionally *not* exposed anywhere in the user UI.
-# Unauthorized access returns 404 to hide their existence.
+# ---- Admin endpoints (protected & hidden via 404 on unauthorized) ----
+# The admin endpoints are accessible if client provides:
+#  - Authorization: Bearer <token> where token is valid issued admin token
+#  OR
+#  - X-ADMIN-SECRET header equals ADMIN_SECRET (developer secret)
+#
+# Unauthorized requests get 404 to hide endpoint existence.
 
-# Admin root / developer panel (hidden)
-@app.get(f"/{ADMIN_ROUTE_PREFIX}")
-def dev_admin_panel(x_admin_secret: Optional[str] = Header(None)):
-    """
-    Very small dev panel entry to check if you have developer access.
-    This endpoint only checks the X-ADMIN-SECRET header; otherwise returns 404.
-    """
-    if x_admin_secret != ADMIN_SECRET:
-        # Hide existence
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    return {"status": "ok", "message": "Developer admin access granted.", "admin_route": ADMIN_ROUTE_PREFIX}
-
-
-# Admin login - only via hidden path and requires developer header to reach it
-@app.post(f"/{ADMIN_ROUTE_PREFIX}/login")
-def admin_login(request: Request, x_admin_secret: Optional[str] = Header(None)):
-    """
-    Admin login through the hidden route. Must include X-ADMIN-SECRET header.
-    Returns a dynamic bearer token for further admin calls.
-    """
-    if x_admin_secret != ADMIN_SECRET:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-
-    content_type = (request.headers.get("content-type") or "")
-    data = {}
-    if "application/json" in content_type:
-        # admin should send JSON credentials
-        data = request.json()  # will be a coroutine if not awaited; do simple form handling instead
-        # to simplify usage for many clients, prefer form-based below
-    form = None
-    try:
-        form = request._body  # fallback - don't rely on this; prefer sending form data
-    except Exception:
-        form = None
-
-    # Simpler: parse as form if any
-    try:
-        form = await request.form()
-        data = dict(form)
-    except Exception:
-        # maybe JSON - try again safely
-        try:
-            data = request.json()
-            if hasattr(data, "__await__"):
-                data = await data
-        except Exception:
-            data = {}
-
-    username = data.get("username")
-    password = data.get("password")
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        token = secrets.token_hex(16)
-        ADMIN_TOKENS[token] = time.time()
-        return {"message": "Admin login successful", "token": token}
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+# Helper to build responses appropriate to frontends expecting arrays
+def _user_summary(u: Dict[str, Any]) -> Dict[str, Any]:
+    # Return fields expected by the admin frontends
+    username = u["username"]
+    inv = investments.get(username, {})
+    pending_withdrawal = withdrawals.get(username, {}).get("amount", 0.0) if username in withdrawals else 0.0
+    return {
+        "username": u["username"],
+        "number": u["number"],
+        "referral": u.get("referral"),
+        "approved": u.get("approved", False),
+        "total_invested": inv.get("amount", 0.0) if inv else 0.0,
+        "investment_approved": inv.get("approved", False) if inv else False,
+        "balance": u.get("balance", 0.0),
+        "earnings": u.get("earnings", 0.0),
+        "pending_withdrawal": pending_withdrawal,
+    }
 
 
-# Admin: list users (hidden)
-@app.get(f"/{ADMIN_ROUTE_PREFIX}/users")
+@app.get("/admin/users")
 def admin_list_users(auth=Depends(admin_auth)):
-    # Return summary of users
-    return {"count": len(users), "users": [{ "username": u["username"], "number": u["number"], "approved": u["approved"] } for u in users.values()]}
+    # return array to match frontend expectations
+    return [ _user_summary(u) for u in users.values() ]
 
 
-# Admin: get single user (hidden)
-@app.get(f"/{ADMIN_ROUTE_PREFIX}/user/{username}")
-def admin_get_user(username: str, auth=Depends(admin_auth)):
-    u = users.get(username)
-    if not u:
-        # Hide existence for non-admin probing
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    return u
-
-
-# Admin: approve investment (hidden)
-@app.post(f"/{ADMIN_ROUTE_PREFIX}/investment/approve")
-def admin_approve_investment(username: str = Form(...), auth=Depends(admin_auth)):
-    inv = investments.get(username)
-    if not inv:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    inv["approved"] = True
-    # move principal into user's principal
-    u = users.get(username)
-    if u:
-        u["principal"] = u.get("principal", 0.0) + inv["amount"]
-        # example: set bonus days if your business logic requires it
-        u["bonus_days_remaining"] = 30
-    return {"message": "Investment approved"}
-
-
-# Admin: approve user (hidden)
-@app.post(f"/{ADMIN_ROUTE_PREFIX}/user/approve")
+@app.post("/admin/approve_user")
 def admin_approve_user(username: str = Form(...), auth=Depends(admin_auth)):
     u = users.get(username)
     if not u:
@@ -531,52 +439,135 @@ def admin_approve_user(username: str = Form(...), auth=Depends(admin_auth)):
     return {"message": f"User {username} approved"}
 
 
-# Admin: resend OTP to user (hidden)
-@app.post(f"/{ADMIN_ROUTE_PREFIX}/user/resend-otp")
-def admin_resend_otp(username: str = Form(...), auth=Depends(admin_auth)):
+@app.post("/admin/approve_investment")
+def admin_approve_investment(username: str = Form(...), auth=Depends(admin_auth)):
+    inv = investments.get(username)
+    if not inv:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    inv["approved"] = True
+    u = users.get(username)
+    if u:
+        u["principal"] = u.get("principal", 0.0) + inv["amount"]
+        u["bonus_days_remaining"] = 30  # example business rule
+    return {"message": "Investment approved"}
+
+
+@app.post("/admin/approve_withdrawal")
+def admin_approve_withdrawal(username: str = Form(...), auth=Depends(admin_auth)):
+    wd = withdrawals.get(username)
+    if not wd:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    # process withdrawal: subtract from balance
     u = users.get(username)
     if not u:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    otp = generate_otp()
-    store_otp_for_user(username, otp)
-    user_msg = f"Your {PLATFORM_NAME} verification code is: {otp}. It expires in {OTP_TTL_SECONDS // 60} minutes."
-    send_sms(u["number"], user_msg)
-    return {"message": "OTP resent"}
+    amount = wd.get("amount", 0.0)
+    if u.get("balance", 0.0) < amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    u["balance"] = u.get("balance", 0.0) - amount
+    wd["approved"] = True
+    return {"message": f"Withdrawal of KES {amount:.2f} approved"}
 
 
-# Admin: revoke user approval (hidden)
-@app.post(f"/{ADMIN_ROUTE_PREFIX}/user/revoke")
-def admin_revoke_user(username: str = Form(...), auth=Depends(admin_auth)):
-    u = users.get(username)
+@app.post("/admin/reset-password")
+def admin_reset_password(target_username: str = Form(...), new_password: str = Form(...), auth=Depends(admin_auth)):
+    u = users.get(target_username)
     if not u:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
-    u["approved"] = False
-    return {"message": f"User {username} revoked"}
+    u["password_hash"] = hash_pwd(new_password)
+    return {"message": f"Password for {target_username} reset"}
 
 
-# Admin: view pending investments (hidden)
-@app.get(f"/{ADMIN_ROUTE_PREFIX}/investments/pending")
-def admin_pending_investments(auth=Depends(admin_auth)):
-    pending = [inv for inv in investments.values() if not inv.get("approved", False)]
-    return {"pending_count": len(pending), "pending": pending}
+@app.post("/admin/terminate_user")
+def admin_terminate_user(username: str = Form(...), auth=Depends(admin_auth)):
+    if username in users:
+        users.pop(username, None)
+    investments.pop(username, None)
+    withdrawals.pop(username, None)
+    return {"message": f"User {username} terminated"}
 
 
-# ----- NOTE on admin route secrecy -----
-# - The admin route path is /dev-<ADMIN_PATH_TOKEN>-panel, where ADMIN_PATH_TOKEN is set via env var ADMIN_PATH_TOKEN.
-# - To query it, include header: X-ADMIN-SECRET: <ADMIN_SECRET>
-# - Unauthorized requests get a 404 to hide admin endpoints.
-# - ADMIN_SECRET and ADMIN_PATH_TOKEN should be stored securely (not in public source).
-#
-# Example .env:
-# TWILIO_SID=ACxxxxxxxxxxxxxxxxxxx
-# TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxx
-# TWILIO_FROM=+1XXXXXXXXXX
-# ADMIN_ALERT_NUMBER=+254748066116
-# ADMIN_PATH_TOKEN=9fa83b27
-# ADMIN_SECRET=superstrongsecret
-# ADMIN_USERNAME=admin
-# ADMIN_PASSWORD=admin4857
+@app.get("/admin/validate")
+def admin_validate(authorization: Optional[str] = Header(None), x_admin_secret: Optional[str] = Header(None)):
+    # validate admin token or secret; returns 200 OK if valid (frontend expects ok)
+    try:
+        admin_auth(authorization=authorization, x_admin_secret=x_admin_secret)
+        return {"valid": True}
+    except HTTPException:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
 
-# ----- Small startup log to show admin route (only in server logs) -----
-logger.info(f"Hidden admin route available at: /{ADMIN_ROUTE_PREFIX} (requires X-ADMIN-SECRET header).")
-logger.info("Ensure ADMIN_PATH_TOKEN and ADMIN_SECRET are kept secret and not in public code.")
+
+@app.post("/admin/refresh")
+def admin_refresh(authorization: Optional[str] = Header(None), x_admin_secret: Optional[str] = Header(None)):
+    # exchange a valid token for a fresh one (return {"new_token": ...})
+    # require existing token provided
+    if x_admin_secret and x_admin_secret == ADMIN_SECRET:
+        # developer header used - issue new token
+        new = issue_admin_token()
+        return {"new_token": new}
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+    old = authorization.split()[1]
+    prune_admin_tokens()
+    if old == ADMIN_TOKEN:
+        # static token used - issue new dynamic token
+        new = issue_admin_token()
+        return {"new_token": new}
+    if old in ADMIN_TOKENS:
+        # issue new token and remove old
+        new = issue_admin_token()
+        ADMIN_TOKENS.pop(old, None)
+        return {"new_token": new}
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
+
+# ---- Mirror admin endpoints under hidden developer prefix (optional) ----
+# This is handy if you want to access admin APIs at a secret path like:
+#   /dev-<ADMIN_PATH_TOKEN>-panel/users
+# These simply reuse the same logic above, but having the version here can make it easier
+# to access via the "secret admin path" frontend variant you designed.
+# They also use the same admin_auth dependency so unauthorized requests still get 404.
+
+@app.get(f"/{ADMIN_ROUTE_PREFIX}/users")
+def hidden_admin_list_users(auth=Depends(admin_auth)):
+    return admin_list_users(auth=auth)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/approve_user")
+def hidden_admin_approve_user(username: str = Form(...), auth=Depends(admin_auth)):
+    return admin_approve_user(username=username, auth=auth)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/approve_investment")
+def hidden_admin_approve_investment(username: str = Form(...), auth=Depends(admin_auth)):
+    return admin_approve_investment(username=username, auth=auth)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/approve_withdrawal")
+def hidden_admin_approve_withdrawal(username: str = Form(...), auth=Depends(admin_auth)):
+    return admin_approve_withdrawal(username=username, auth=auth)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/reset-password")
+def hidden_admin_reset_password(target_username: str = Form(...), new_password: str = Form(...), auth=Depends(admin_auth)):
+    return admin_reset_password(target_username=target_username, new_password=new_password, auth=auth)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/terminate_user")
+def hidden_admin_terminate_user(username: str = Form(...), auth=Depends(admin_auth)):
+    return admin_terminate_user(username=username, auth=auth)
+
+
+@app.get(f"/{ADMIN_ROUTE_PREFIX}/validate")
+def hidden_admin_validate(authorization: Optional[str] = Header(None), x_admin_secret: Optional[str] = Header(None)):
+    return admin_validate(authorization=authorization, x_admin_secret=x_admin_secret)
+
+
+@app.post(f"/{ADMIN_ROUTE_PREFIX}/refresh")
+def hidden_admin_refresh(authorization: Optional[str] = Header(None), x_admin_secret: Optional[str] = Header(None)):
+    return admin_refresh(authorization=authorization, x_admin_secret=x_admin_secret)
+
+
+# ---- Startup info (logging) ----
+logger.info(f"Hidden admin route prefix: /{ADMIN_ROUTE_PREFIX}")
+logger.info("Ensure ADMIN_PATH_TOKEN and ADMIN_SECRET are kept secret and not committed to source control.")
