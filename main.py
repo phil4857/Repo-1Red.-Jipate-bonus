@@ -1,19 +1,20 @@
 """
 Mkoba Wallet Backend
-Features:
-- User Registration + OTP verification
-- Login
-- Commodity Investments (OTP confirmed)
+Fully aligned with HTML/JS frontend:
+- User registration + OTP
+- Login + verification
+- Referral system
+- Investments in commodities (OTP confirmed)
 - 10% daily earnings
 - Withdrawals (Monday only + OTP)
-- Dashboard with countdown timers
+- Dashboard with earnings, bonus days, investment countdowns
 """
 
 import time
 import secrets
 import logging
-from typing import Dict, Any
 from datetime import datetime, timedelta
+from typing import Dict, Any
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,12 +36,13 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mkoba-backend")
 
-# ---------------- STORAGE (IN-MEMORY) ----------------
+# ---------------- STORAGE ----------------
 
 users: Dict[str, Dict[str, Any]] = {}
 otps: Dict[str, Dict[str, Any]] = {}
 pending_investments: Dict[str, Dict[str, Any]] = {}
 pending_withdrawals: Dict[str, Dict[str, Any]] = {}
+daily_bonus_claims: Dict[str, datetime] = {}
 
 # ---------------- CONFIG ----------------
 
@@ -64,11 +66,14 @@ COMMODITY_INFO = {
 
 class User(BaseModel):
     username: str
-    number: str
+    phone: str
     password_hash: str
     approved: bool = False
     balance: float = 10000.0
+    earnings: float = 0.0
     investments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    referral: str = ""
+    bonus_days_remaining: int = 0
 
 # ---------------- HELPERS ----------------
 
@@ -108,14 +113,15 @@ def health():
 # ---------------- REGISTER ----------------
 
 @app.post("/register")
-def register(username: str = Form(...), number: str = Form(...), password: str = Form(...)):
+def register(username: str = Form(...), phone: str = Form(...), password: str = Form(...), referral: str = Form("")):
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
 
     user = User(
         username=username,
-        number=number,
-        password_hash=hash_pwd(password)
+        phone=phone,
+        password_hash=hash_pwd(password),
+        referral=referral
     )
 
     users[username] = user.dict()
@@ -149,48 +155,96 @@ def login(username: str = Form(...), password: str = Form(...)):
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-
     if not check_pwd(password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Invalid password")
-
     if not user.get("approved"):
         raise HTTPException(status_code=403, detail="Account not verified")
 
     return {
         "message": "Login successful",
         "username": username,
-        "balance": user["balance"]
+        "balance": user["balance"],
+        "earnings": user["earnings"]
     }
 
-# ---------------- INVEST REQUEST ----------------
+# ---------------- DASHBOARD ----------------
 
-@app.post("/invest/request")
-def invest_request(username: str = Form(...), commodity: str = Form(...)):
-    if commodity not in COMMODITY_INFO:
-        raise HTTPException(status_code=400, detail="Invalid commodity")
-
+@app.get("/dashboard")
+def dashboard(username: str):
     user = users.get(username)
     if not user or not user.get("approved"):
         raise HTTPException(status_code=403, detail="Account not approved")
 
-    price = COMMODITY_INFO[commodity]["price"]
+    investments_status = {}
+    total_earnings = user["earnings"]
 
+    for commodity, inv in user["investments"].items():
+        start = inv["start_date"]
+        expiry = inv["expiry_date"]
+
+        remaining = expiry - datetime.utcnow()
+        days_running = (datetime.utcnow() - start).days
+        daily_profit = inv["amount"] * 0.10
+        total_earned = daily_profit * max(days_running, 0)
+        total_earnings += total_earned
+
+        investments_status[commodity] = {
+            "amount": inv["amount"],
+            "daily_profit": daily_profit,
+            "total_earned": total_earned,
+            "expiry_date": expiry,
+            "time_remaining": str(remaining).split(".")[0] if remaining.total_seconds() > 0 else "Expired"
+        }
+
+    return {
+        "username": username,
+        "balance": user["balance"],
+        "earnings": total_earnings,
+        "investments": investments_status,
+        "bonus_days_remaining": user.get("bonus_days_remaining", 0)
+    }
+
+# ---------------- DAILY BONUS ----------------
+
+@app.post("/bonus/grab")
+def grab_bonus(username: str = Form(...)):
+    user = users.get(username)
+    if not user or not user.get("approved"):
+        raise HTTPException(status_code=403, detail="Account not approved")
+
+    last_claim = daily_bonus_claims.get(username)
+    now = datetime.utcnow()
+    if last_claim and (now - last_claim).total_seconds() < 24*3600:
+        remaining = 24*3600 - (now - last_claim).total_seconds()
+        raise HTTPException(status_code=400, detail=f"Bonus already claimed. Try again in {int(remaining//3600)}h {int((remaining%3600)//60)}m")
+
+    bonus_amount = 500
+    user["balance"] += bonus_amount
+    daily_bonus_claims[username] = now
+    user["bonus_days_remaining"] = user.get("bonus_days_remaining", 0) + 1
+
+    return {"message": f"Daily bonus KES {bonus_amount} credited!"}
+
+# ---------------- INVESTMENT ----------------
+
+@app.post("/invest/request")
+def invest_request(username: str = Form(...), commodity: str = Form(...)):
+    user = users.get(username)
+    if not user or not user.get("approved"):
+        raise HTTPException(status_code=403, detail="Account not approved")
+    if commodity not in COMMODITY_INFO:
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+
+    price = COMMODITY_INFO[commodity]["price"]
     if user["balance"] < price:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
     otp = generate_otp()
     store_otp(f"{username}_invest", otp)
-
-    pending_investments[username] = {
-        "commodity": commodity,
-        "price": price
-    }
+    pending_investments[username] = {"commodity": commodity, "price": price}
 
     logger.info(f"[OTP MOCK] Investment OTP for {username}: {otp}")
-
     return {"message": "OTP sent to confirm investment"}
-
-# ---------------- INVEST CONFIRM ----------------
 
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...), otp: str = Form(...)):
@@ -204,22 +258,16 @@ def invest_confirm(username: str = Form(...), otp: str = Form(...)):
     user = users[username]
     commodity = pending["commodity"]
     price = pending["price"]
-
     user["balance"] -= price
-
-    expiry_date = datetime.utcnow() + timedelta(
-        days=COMMODITY_INFO[commodity]["expiry_days"]
-    )
-
     user["investments"][commodity] = {
         "amount": price,
         "start_date": datetime.utcnow(),
-        "expiry_date": expiry_date
+        "expiry_date": datetime.utcnow() + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
     }
 
     return {"message": f"Investment in {commodity} confirmed"}
 
-# ---------------- WITHDRAW REQUEST ----------------
+# ---------------- WITHDRAWAL ----------------
 
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
@@ -227,7 +275,7 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
     if not user or not user.get("approved"):
         raise HTTPException(status_code=403, detail="Account not approved")
 
-    if datetime.utcnow().weekday() != 0:
+    if datetime.utcnow().weekday() != 0:  # Monday only
         raise HTTPException(status_code=400, detail="Withdrawals allowed only on Monday")
 
     if amount <= 0 or amount > user["balance"]:
@@ -235,14 +283,10 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
 
     otp = generate_otp()
     store_otp(f"{username}_withdraw", otp)
-
     pending_withdrawals[username] = {"amount": amount}
 
     logger.info(f"[OTP MOCK] Withdrawal OTP for {username}: {otp}")
-
     return {"message": "OTP sent to confirm withdrawal"}
-
-# ---------------- WITHDRAW CONFIRM ----------------
 
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
@@ -255,46 +299,6 @@ def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
 
     user = users[username]
     amount = pending["amount"]
-
     user["balance"] -= amount
 
-    return {"message": f"Withdrawal of {amount} successful"}
-
-# ---------------- DASHBOARD ----------------
-
-@app.get("/dashboard")
-def dashboard(username: str):
-    user = users.get(username)
-    if not user or not user.get("approved"):
-        raise HTTPException(status_code=403, detail="Account not approved")
-
-    investment_status = {}
-
-    for commodity, inv in user["investments"].items():
-        expiry = inv["expiry_date"]
-        start = inv["start_date"]
-
-        remaining = expiry - datetime.utcnow()
-        days_running = (datetime.utcnow() - start).days
-
-        daily_profit = inv["amount"] * 0.10
-        total_earned = daily_profit * max(days_running, 0)
-
-        if remaining.total_seconds() <= 0:
-            time_remaining = "Expired"
-        else:
-            time_remaining = str(remaining).split(".")[0]
-
-        investment_status[commodity] = {
-            "amount": inv["amount"],
-            "daily_profit": daily_profit,
-            "total_earned": total_earned,
-            "expiry_date": expiry,
-            "time_remaining": time_remaining
-        }
-
-    return {
-        "username": username,
-        "balance": user["balance"],
-        "investments": investment_status
-    }
+    return {"message": f"Withdrawal of KES {amount} successful"}
