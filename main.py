@@ -1,6 +1,6 @@
 # main.py
 """
-Mkoba Wallet Backend with:
+Mkoba Wallet Backend
 - User registration + OTP
 - Commodity trading: Silver, Gold, Marble, Diamond, Uranium
 - Investment + OTP confirmation
@@ -70,28 +70,23 @@ class User(BaseModel):
     balance: float = 0.0
     investments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
-
 # ---- Helpers ----
 def hash_pwd(pw: str) -> str:
     import bcrypt
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
-
 def check_pwd(pw: str, hashed: str) -> bool:
     import bcrypt
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
-
 def generate_otp(length: int = OTP_LENGTH) -> str:
     return "".join(secrets.choice("0123456789") for _ in range(length))
-
 
 def store_otp(key: str, otp: str):
     otps[key] = {
         "otp": otp,
         "expires_at": time.time() + OTP_TTL_SECONDS
     }
-
 
 def verify_otp(key: str, otp: str) -> bool:
     rec = otps.get(key)
@@ -105,13 +100,10 @@ def verify_otp(key: str, otp: str) -> bool:
         return True
     return False
 
-
 # ---- Public Endpoints ----
-
 @app.get("/health")
 def health():
     return {"status": "ok", "timestamp": time.time()}
-
 
 @app.post("/register")
 async def register(
@@ -138,7 +130,6 @@ async def register(
 
     return {"message": "User registered. OTP sent."}
 
-
 @app.post("/verify-otp")
 def verify_registration_otp(username: str = Form(...), otp: str = Form(...)):
     user = users.get(username)
@@ -151,9 +142,7 @@ def verify_registration_otp(username: str = Form(...), otp: str = Form(...)):
 
     raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-
 # ---- Investment Flow ----
-
 @app.post("/invest/request")
 def invest_request(username: str = Form(...), commodity: str = Form(...)):
     if commodity not in COMMODITY_INFO:
@@ -164,7 +153,6 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
         raise HTTPException(status_code=403, detail="Account not approved")
 
     price = COMMODITY_INFO[commodity]["price"]
-
     if user["balance"] < price:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
@@ -179,7 +167,6 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
     logger.info(f"[SMS MOCK] To: {user['number']} | Investment OTP: {otp}")
 
     return {"message": "OTP sent to confirm investment"}
-
 
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...), otp: str = Form(...)):
@@ -210,9 +197,7 @@ def invest_confirm(username: str = Form(...), otp: str = Form(...)):
 
     return {"message": f"Investment in {commodity} confirmed"}
 
-
 # ---- Withdrawal Flow ----
-
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
     user = users.get(username)
@@ -234,7 +219,6 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
 
     return {"message": "OTP sent to confirm withdrawal"}
 
-
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
     if not verify_otp(f"{username}_withdraw", otp):
@@ -246,14 +230,11 @@ def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
 
     user = users[username]
     amount = pending["amount"]
-
     user["balance"] -= amount
 
     return {"message": f"Withdrawal of {amount} successful"}
 
-
 # ---- Dashboard ----
-
 @app.get("/dashboard")
 def dashboard(username: str):
     user = users.get(username)
@@ -263,21 +244,28 @@ def dashboard(username: str):
     investment_status = {}
 
     for commodity, inv in user["investments"].items():
-        expiry = inv["expiry_date"]
+        expiry: datetime = inv["expiry_date"]
         now = datetime.utcnow()
-
         remaining = expiry - now
-        hours_remaining = int(remaining.total_seconds() // 3600)
-
+        if remaining.total_seconds() < 0:
+            remaining = timedelta(0)
         investment_status[commodity] = {
             "amount": inv["amount"],
-            "expiry_date": expiry,
-            "time_remaining": str(remaining).split(".")[0],
-            "hours_remaining": hours_remaining
+            "expiry_date": expiry.isoformat(),
+            "time_remaining": str(remaining),
+            "hours_remaining": int(remaining.total_seconds() // 3600)
         }
 
     return {
         "username": username,
         "balance": user["balance"],
-        "investments": investment_status
+        "active_investments": [
+            {
+                "commodity": c,
+                "amount": v["amount"],
+                "start_date": (datetime.utcnow() - timedelta(days=0)).isoformat(),  # placeholder
+                "duration_days": COMMODITY_INFO[c]["expiry_days"]
+            }
+            for c, v in user["investments"].items()
+        ]
     }
