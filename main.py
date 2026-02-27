@@ -4,29 +4,24 @@ Features:
 - User Registration + OTP verification
 - Login
 - Commodity Investments (OTP confirmed)
+- 10% daily earnings
 - Withdrawals (Monday only + OTP)
 - Dashboard with countdown timers
 """
 
-import os
 import time
 import secrets
 import logging
 from typing import Dict, Any
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+import bcrypt
 
-# Optional .env loading
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
+# ---------------- APP SETUP ----------------
 
-# ---- App Setup ----
 app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
@@ -40,17 +35,20 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mkoba-backend")
 
-# ---- In-memory storage ----
+# ---------------- STORAGE (IN-MEMORY) ----------------
+
 users: Dict[str, Dict[str, Any]] = {}
 otps: Dict[str, Dict[str, Any]] = {}
 pending_investments: Dict[str, Dict[str, Any]] = {}
 pending_withdrawals: Dict[str, Dict[str, Any]] = {}
 
-# ---- Config ----
+# ---------------- CONFIG ----------------
+
 OTP_LENGTH = 6
 OTP_TTL_SECONDS = 300
 
-# ---- Commodity Info ----
+# ---------------- COMMODITIES ----------------
+
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
     "crude_oil": {"price": 800, "expiry_days": 20},
@@ -59,29 +57,29 @@ COMMODITY_INFO = {
     "platinum": {"price": 1350, "expiry_days": 28},
     "diamonds": {"price": 1750, "expiry_days": 32},
     "gold": {"price": 2200, "expiry_days": 35},
-    "uranium": {"price": 3000, "expiry_days": 45}
+    "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-# ---- Models ----
+# ---------------- MODELS ----------------
+
 class User(BaseModel):
     username: str
     number: str
     password_hash: str
     approved: bool = False
-    balance: float = 10000.0   # starter balance for testing
+    balance: float = 10000.0
     investments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
-# ---- Helpers ----
+# ---------------- HELPERS ----------------
+
 def hash_pwd(pw: str) -> str:
-    import bcrypt
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 def check_pwd(pw: str, hashed: str) -> bool:
-    import bcrypt
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
 def generate_otp() -> str:
-    return "".join(secrets.choice("0123456789") for _ in range(OTP_LENGTH))
+    return ''.join(secrets.choice("0123456789") for _ in range(OTP_LENGTH))
 
 def store_otp(key: str, otp: str):
     otps[key] = {
@@ -101,18 +99,16 @@ def verify_otp(key: str, otp: str) -> bool:
         return True
     return False
 
-# ---- Health ----
+# ---------------- HEALTH ----------------
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# ---- Registration ----
+# ---------------- REGISTER ----------------
+
 @app.post("/register")
-async def register(
-    username: str = Form(...),
-    number: str = Form(...),
-    password: str = Form(...)
-):
+def register(username: str = Form(...), number: str = Form(...), password: str = Form(...)):
     if username in users:
         raise HTTPException(status_code=400, detail="Username already exists")
 
@@ -131,7 +127,8 @@ async def register(
 
     return {"message": "User registered. OTP sent."}
 
-# ---- Verify Registration OTP ----
+# ---------------- VERIFY REGISTRATION ----------------
+
 @app.post("/verify-otp")
 def verify_registration(username: str = Form(...), otp: str = Form(...)):
     user = users.get(username)
@@ -144,9 +141,10 @@ def verify_registration(username: str = Form(...), otp: str = Form(...)):
 
     raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-# ---- Login ----
+# ---------------- LOGIN ----------------
+
 @app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
+def login(username: str = Form(...), password: str = Form(...)):
     user = users.get(username)
 
     if not user:
@@ -164,7 +162,8 @@ async def login(username: str = Form(...), password: str = Form(...)):
         "balance": user["balance"]
     }
 
-# ---- Investment Request ----
+# ---------------- INVEST REQUEST ----------------
+
 @app.post("/invest/request")
 def invest_request(username: str = Form(...), commodity: str = Form(...)):
     if commodity not in COMMODITY_INFO:
@@ -191,7 +190,8 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
 
     return {"message": "OTP sent to confirm investment"}
 
-# ---- Confirm Investment ----
+# ---------------- INVEST CONFIRM ----------------
+
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...), otp: str = Form(...)):
     if not verify_otp(f"{username}_invest", otp):
@@ -213,12 +213,14 @@ def invest_confirm(username: str = Form(...), otp: str = Form(...)):
 
     user["investments"][commodity] = {
         "amount": price,
+        "start_date": datetime.utcnow(),
         "expiry_date": expiry_date
     }
 
     return {"message": f"Investment in {commodity} confirmed"}
 
-# ---- Withdrawal Request ----
+# ---------------- WITHDRAW REQUEST ----------------
+
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
     user = users.get(username)
@@ -240,7 +242,8 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
 
     return {"message": "OTP sent to confirm withdrawal"}
 
-# ---- Confirm Withdrawal ----
+# ---------------- WITHDRAW CONFIRM ----------------
+
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
     if not verify_otp(f"{username}_withdraw", otp):
@@ -257,7 +260,8 @@ def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
 
     return {"message": f"Withdrawal of {amount} successful"}
 
-# ---- Dashboard ----
+# ---------------- DASHBOARD ----------------
+
 @app.get("/dashboard")
 def dashboard(username: str):
     user = users.get(username)
@@ -268,14 +272,25 @@ def dashboard(username: str):
 
     for commodity, inv in user["investments"].items():
         expiry = inv["expiry_date"]
+        start = inv["start_date"]
+
         remaining = expiry - datetime.utcnow()
-        hours_remaining = int(remaining.total_seconds() // 3600)
+        days_running = (datetime.utcnow() - start).days
+
+        daily_profit = inv["amount"] * 0.10
+        total_earned = daily_profit * max(days_running, 0)
+
+        if remaining.total_seconds() <= 0:
+            time_remaining = "Expired"
+        else:
+            time_remaining = str(remaining).split(".")[0]
 
         investment_status[commodity] = {
             "amount": inv["amount"],
+            "daily_profit": daily_profit,
+            "total_earned": total_earned,
             "expiry_date": expiry,
-            "time_remaining": str(remaining).split(".")[0],
-            "hours_remaining": hours_remaining
+            "time_remaining": time_remaining
         }
 
     return {
