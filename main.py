@@ -1,15 +1,3 @@
-"""
-Mkoba Wallet Backend
-Fully aligned with HTML/JS frontend:
-- User registration + OTP
-- Login + verification
-- Referral system
-- Investments in commodities (OTP confirmed)
-- 10% daily earnings
-- Withdrawals (Monday only + OTP)
-- Dashboard with earnings, bonus days, investment countdowns
-"""
-
 import time
 import secrets
 import logging
