@@ -2,7 +2,7 @@ import time
 import secrets
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +15,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # adjust in prod to specific frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,15 +27,14 @@ logger = logging.getLogger("mkoba-backend")
 # ---------------- STORAGE ----------------
 
 users: Dict[str, Dict[str, Any]] = {}
-otps: Dict[str, str] = {}
+otps: Dict[str, Tuple[str, float]] = {}  # otp, expiration timestamp
 pending_investments: Dict[str, Dict[str, Any]] = {}
 pending_withdrawals: Dict[str, Dict[str, Any]] = {}
-daily_bonus_claims: Dict[str, datetime] = {}
 
 # ---------------- CONFIG ----------------
 
 OTP_LENGTH = 6
-OTP_TTL_SECONDS = 300
+OTP_TTL_SECONDS = 300  # 5 minutes
 
 # ---------------- COMMODITIES ----------------
 
@@ -75,14 +74,19 @@ def generate_otp() -> str:
     return ''.join(secrets.choice("0123456789") for _ in range(OTP_LENGTH))
 
 def store_otp(key: str, otp: str):
-    otps[key] = otp
-    # Set an expiration for the OTP
-    expiration = time.time() + OTP_TTL_SECONDS
-    return expiration
+    expire_time = time.time() + OTP_TTL_SECONDS
+    otps[key] = (otp, expire_time)
 
 def verify_otp(key: str, otp: str) -> bool:
-    if key not in otps or otps[key] != otp:
+    if key not in otps:
         return False
+    stored_otp, expire_time = otps[key]
+    if time.time() > expire_time:
+        del otps[key]
+        return False
+    if stored_otp != otp:
+        return False
+    del otps[key]  # OTP consumed after successful verification
     return True
 
 # ---------------- HEALTH ----------------
@@ -94,9 +98,14 @@ def health():
 # ---------------- REGISTER ----------------
 
 @app.post("/register")
-def register(username: str = Form(...), phone: str = Form(...), password: str = Form(...), referral: str = Form("")):
+def register(
+    username: str = Form(...),
+    phone: str = Form(...),
+    password: str = Form(...),
+    referral: str = Form("")
+):
     if username in users:
-        logger.warning(f"Registration failed: Username {username} already exists.")
+        logger.warning(f"Registration failed: Username {username} exists.")
         raise HTTPException(status_code=400, detail="Username already exists")
 
     user = User(
@@ -112,8 +121,7 @@ def register(username: str = Form(...), phone: str = Form(...), password: str = 
     store_otp(username, otp)
 
     logger.info(f"[OTP MOCK] Registration OTP for {username}: {otp}")
-
-    return {"message": "User registered. OTP sent."}
+    return {"message": f"User registered. OTP sent to {phone}."}
 
 # ---------------- VERIFY REGISTRATION ----------------
 
@@ -137,15 +145,11 @@ def verify_registration(username: str = Form(...), otp: str = Form(...)):
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     user = users.get(username)
-
     if not user:
-        logger.warning(f"Login failed: User {username} not found.")
         raise HTTPException(status_code=404, detail="User not found")
     if not check_pwd(password, user["password_hash"]):
-        logger.warning(f"Login failed: Invalid password for {username}.")
         raise HTTPException(status_code=400, detail="Invalid password")
     if not user.get("approved"):
-        logger.warning(f"Login failed: Account for {username} not verified.")
         raise HTTPException(status_code=403, detail="Account not verified")
 
     return {
@@ -153,6 +157,31 @@ def login(username: str = Form(...), password: str = Form(...)):
         "username": username,
         "balance": user["balance"],
         "earnings": user["earnings"]
+    }
+
+# ---------------- DASHBOARD ----------------
+
+@app.get("/dashboard")
+def dashboard(username: str):
+    user = users.get(username)
+    if not user or not user.get("approved"):
+        raise HTTPException(status_code=403, detail="Account not approved")
+
+    investments_status = {}
+    for commodity, inv in user["investments"].items():
+        start = inv["start_date"]
+        expiry = inv["expiry_date"]
+        remaining_days = max((expiry - datetime.utcnow()).days, 0)
+        investments_status[commodity] = {
+            "amount": inv["amount"],
+            "days_remaining": remaining_days
+        }
+
+    return {
+        "username": username,
+        "balance": user["balance"],
+        "earnings": user["earnings"],
+        "investments": investments_status
     }
 
 # ---------------- INVESTMENT ----------------
@@ -232,21 +261,3 @@ def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
     user["balance"] -= amount
 
     return {"message": f"Withdrawal of KES {amount} successful"}
-
-# ---------------- DASHBOARD ----------------
-
-@app.get("/dashboard")
-def dashboard(username: str):
-    user = users.get(username)
-    if not user or not user.get("approved"):
-        raise HTTPException(status_code=403, detail="Account not approved")
-
-    investments_status = {}
-    total_earnings = user["earnings"]
-
-    for commodity, inv in user["investments"].items():
-        start = inv["start_date"]
-        expiry = inv["expiry_date"]
-
-        remaining = expiry - datetime.utcnow()
-        days_running = (datetime.utcnow() - start).days
