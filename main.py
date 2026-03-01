@@ -27,7 +27,7 @@ logger = logging.getLogger("mkoba-backend")
 # ---------------- STORAGE ----------------
 
 users: Dict[str, Dict[str, Any]] = {}
-otps: Dict[str, Dict[str, Any]] = {}
+otps: Dict[str, str] = {}
 pending_investments: Dict[str, Dict[str, Any]] = {}
 pending_withdrawals: Dict[str, Dict[str, Any]] = {}
 daily_bonus_claims: Dict[str, datetime] = {}
@@ -75,22 +75,15 @@ def generate_otp() -> str:
     return ''.join(secrets.choice("0123456789") for _ in range(OTP_LENGTH))
 
 def store_otp(key: str, otp: str):
-    otps[key] = {
-        "otp": otp,
-        "expires_at": time.time() + OTP_TTL_SECONDS
-    }
+    otps[key] = otp
+    # Set an expiration for the OTP
+    expiration = time.time() + OTP_TTL_SECONDS
+    return expiration
 
 def verify_otp(key: str, otp: str) -> bool:
-    record = otps.get(key)
-    if not record:
+    if key not in otps or otps[key] != otp:
         return False
-    if time.time() > record["expires_at"]:
-        otps.pop(key, None)
-        return False
-    if record["otp"] == otp:
-        otps.pop(key, None)
-        return True
-    return False
+    return True
 
 # ---------------- HEALTH ----------------
 
@@ -103,6 +96,7 @@ def health():
 @app.post("/register")
 def register(username: str = Form(...), phone: str = Form(...), password: str = Form(...), referral: str = Form("")):
     if username in users:
+        logger.warning(f"Registration failed: Username {username} already exists.")
         raise HTTPException(status_code=400, detail="Username already exists")
 
     user = User(
@@ -127,12 +121,15 @@ def register(username: str = Form(...), phone: str = Form(...), password: str = 
 def verify_registration(username: str = Form(...), otp: str = Form(...)):
     user = users.get(username)
     if not user:
+        logger.warning(f"Verification failed: User {username} not found.")
         raise HTTPException(status_code=404, detail="User not found")
 
     if verify_otp(username, otp):
         user["approved"] = True
+        logger.info(f"User {username} verified successfully.")
         return {"message": "Account verified successfully"}
 
+    logger.warning(f"Verification failed: Invalid or expired OTP for {username}.")
     raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
 # ---------------- LOGIN ----------------
@@ -142,10 +139,13 @@ def login(username: str = Form(...), password: str = Form(...)):
     user = users.get(username)
 
     if not user:
+        logger.warning(f"Login failed: User {username} not found.")
         raise HTTPException(status_code=404, detail="User not found")
     if not check_pwd(password, user["password_hash"]):
+        logger.warning(f"Login failed: Invalid password for {username}.")
         raise HTTPException(status_code=400, detail="Invalid password")
     if not user.get("approved"):
+        logger.warning(f"Login failed: Account for {username} not verified.")
         raise HTTPException(status_code=403, detail="Account not verified")
 
     return {
@@ -154,64 +154,6 @@ def login(username: str = Form(...), password: str = Form(...)):
         "balance": user["balance"],
         "earnings": user["earnings"]
     }
-
-# ---------------- DASHBOARD ----------------
-
-@app.get("/dashboard")
-def dashboard(username: str):
-    user = users.get(username)
-    if not user or not user.get("approved"):
-        raise HTTPException(status_code=403, detail="Account not approved")
-
-    investments_status = {}
-    total_earnings = user["earnings"]
-
-    for commodity, inv in user["investments"].items():
-        start = inv["start_date"]
-        expiry = inv["expiry_date"]
-
-        remaining = expiry - datetime.utcnow()
-        days_running = (datetime.utcnow() - start).days
-        daily_profit = inv["amount"] * 0.10
-        total_earned = daily_profit * max(days_running, 0)
-        total_earnings += total_earned
-
-        investments_status[commodity] = {
-            "amount": inv["amount"],
-            "daily_profit": daily_profit,
-            "total_earned": total_earned,
-            "expiry_date": expiry,
-            "time_remaining": str(remaining).split(".")[0] if remaining.total_seconds() > 0 else "Expired"
-        }
-
-    return {
-        "username": username,
-        "balance": user["balance"],
-        "earnings": total_earnings,
-        "investments": investments_status,
-        "bonus_days_remaining": user.get("bonus_days_remaining", 0)
-    }
-
-# ---------------- DAILY BONUS ----------------
-
-@app.post("/bonus/grab")
-def grab_bonus(username: str = Form(...)):
-    user = users.get(username)
-    if not user or not user.get("approved"):
-        raise HTTPException(status_code=403, detail="Account not approved")
-
-    last_claim = daily_bonus_claims.get(username)
-    now = datetime.utcnow()
-    if last_claim and (now - last_claim).total_seconds() < 24*3600:
-        remaining = 24*3600 - (now - last_claim).total_seconds()
-        raise HTTPException(status_code=400, detail=f"Bonus already claimed. Try again in {int(remaining//3600)}h {int((remaining%3600)//60)}m")
-
-    bonus_amount = 500
-    user["balance"] += bonus_amount
-    daily_bonus_claims[username] = now
-    user["bonus_days_remaining"] = user.get("bonus_days_remaining", 0) + 1
-
-    return {"message": f"Daily bonus KES {bonus_amount} credited!"}
 
 # ---------------- INVESTMENT ----------------
 
@@ -290,3 +232,21 @@ def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
     user["balance"] -= amount
 
     return {"message": f"Withdrawal of KES {amount} successful"}
+
+# ---------------- DASHBOARD ----------------
+
+@app.get("/dashboard")
+def dashboard(username: str):
+    user = users.get(username)
+    if not user or not user.get("approved"):
+        raise HTTPException(status_code=403, detail="Account not approved")
+
+    investments_status = {}
+    total_earnings = user["earnings"]
+
+    for commodity, inv in user["investments"].items():
+        start = inv["start_date"]
+        expiry = inv["expiry_date"]
+
+        remaining = expiry - datetime.utcnow()
+        days_running = (datetime.utcnow() - start).days
