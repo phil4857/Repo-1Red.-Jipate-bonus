@@ -2,27 +2,21 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
-from fastapi import FastAPI, Form, HTTPException, Depends
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import bcrypt
-import secrets
-
-# ---------------- CONFIG ----------------
-DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a.singapore-postgres.render.com/mkobawallet"
-REFERRAL_BONUS_PERCENT = 10  # 10% bonus to referrer
-PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
-PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 
 # ---------------- APP SETUP ----------------
+DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a.singapore-postgres.render.com/mkobawallet"
+
 app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # adjust in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,12 +43,9 @@ class UserDB(Base):
     investments = Column(JSON, default={})
     referral = Column(String, default="")
     bonus_days_remaining = Column(Integer, default=0)
-    is_admin = Column(Boolean, default=False)
 
 
 Base.metadata.create_all(bind=engine)
-
-security = HTTPBasic()
 
 # ---------------- HELPERS ----------------
 def hash_pwd(pw: str) -> str:
@@ -63,16 +54,6 @@ def hash_pwd(pw: str) -> str:
 
 def check_pwd(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
-
-
-def admin_required(credentials: HTTPBasicCredentials = Depends(security)):
-    db = SessionLocal()
-    user = db.query(UserDB).filter(UserDB.username == credentials.username).first()
-    if not user or not user.is_admin or not check_pwd(credentials.password, user.password_hash):
-        db.close()
-        raise HTTPException(status_code=403, detail="Admin access required")
-    db.close()
-    return user
 
 
 # ---------------- COMMODITIES ----------------
@@ -87,27 +68,12 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-# ---------------- INITIAL ADMIN ----------------
-def create_admin():
-    db = SessionLocal()
-    admin = db.query(UserDB).filter(UserDB.username == "admin").first()
-    if not admin:
-        new_admin = UserDB(
-            username="admin",
-            phone="0000000000",
-            password_hash=hash_pwd("PHIL4857"),
-            approved=True,
-            is_admin=True
-        )
-        db.add(new_admin)
-        db.commit()
-        logger.info("Admin account created")
-    db.close()
-
-
-create_admin()
+REFERRAL_BONUS_PERCENT = 10  # 10% bonus to referrer
+PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
+PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 
 # ---------------- ROUTES ----------------
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -146,6 +112,10 @@ def register(username: str = Form(...), phone: str = Form(...), password: str = 
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     db = SessionLocal()
+    if username == "admin" and password == "PHIL4857":
+        db.close()
+        return {"message": "Admin login successful", "admin": True}
+
     user = db.query(UserDB).filter(UserDB.username == username).first()
     if not user:
         db.close()
@@ -157,7 +127,39 @@ def login(username: str = Form(...), password: str = Form(...)):
         db.close()
         raise HTTPException(status_code=403, detail="Account not approved")
     db.close()
-    return {"message": "Login successful", "username": username, "balance": user.balance, "earnings": user.earnings, "is_admin": user.is_admin}
+    return {"message": "Login successful", "username": username, "balance": user.balance, "earnings": user.earnings}
+
+
+# ---------------- ADMIN ENDPOINTS ----------------
+@app.get("/all-users")
+def all_users():
+    db = SessionLocal()
+    users = db.query(UserDB).all()
+    result = [{"username": u.username, "phone": u.phone, "approved": u.approved, "referral": u.referral} for u in users]
+    db.close()
+    return result
+
+
+@app.post("/approve-user")
+def approve_user(username: str = Form(...)):
+    db = SessionLocal()
+    user = db.query(UserDB).filter(UserDB.username == username).first()
+    if not user:
+        db.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    user.approved = True
+    db.commit()
+    db.refresh(user)
+    db.close()
+    return {"message": f"User {username} approved successfully"}
+
+
+@app.get("/all-withdrawals")
+def all_withdrawals():
+    db = SessionLocal()
+    result = [{"username": k, "amount": v["amount"]} for k, v in PENDING_WITHDRAWALS.items()]
+    db.close()
+    return result
 
 
 # ---------------- DASHBOARD ----------------
@@ -243,7 +245,7 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         db.close()
         raise HTTPException(status_code=403, detail="Account not approved")
 
-    if datetime.utcnow().weekday() != 0:
+    if datetime.utcnow().weekday() != 0:  # Monday only
         db.close()
         raise HTTPException(status_code=400, detail="Withdrawals allowed only on Monday")
     if amount <= 0 or amount > user.balance:
@@ -274,48 +276,3 @@ def withdraw_confirm(username: str = Form(...)):
     db.refresh(user)
     db.close()
     return {"message": f"Withdrawal of KES {amount} successful"}
-
-
-# ---------------- ADMIN ----------------
-@app.get("/admin/users")
-def list_users(admin: UserDB = Depends(admin_required)):
-    db = SessionLocal()
-    users = db.query(UserDB).all()
-    result = [
-        {"username": u.username, "approved": u.approved, "balance": u.balance, "earnings": u.earnings}
-        for u in users
-    ]
-    db.close()
-    return result
-
-
-@app.post("/admin/approve-user")
-def admin_approve_user(username: str = Form(...), admin: UserDB = Depends(admin_required)):
-    db = SessionLocal()
-    user = db.query(UserDB).filter(UserDB.username == username).first()
-    if not user:
-        db.close()
-        raise HTTPException(status_code=404, detail="User not found")
-    user.approved = True
-    db.commit()
-    db.refresh(user)
-    db.close()
-    return {"message": f"User {username} approved successfully"}
-
-
-@app.post("/admin/approve-withdrawal")
-def admin_approve_withdrawal(username: str = Form(...), admin: UserDB = Depends(admin_required)):
-    db = SessionLocal()
-    user = db.query(UserDB).filter(UserDB.username == username).first()
-    pending = PENDING_WITHDRAWALS.pop(username, None)
-    if not user or not pending:
-        db.close()
-        raise HTTPException(status_code=400, detail="No pending withdrawal or user not found")
-    if user.balance < pending["amount"]:
-        db.close()
-        raise HTTPException(status_code=400, detail="Insufficient balance")
-    user.balance -= pending["amount"]
-    db.commit()
-    db.refresh(user)
-    db.close()
-    return {"message": f"Withdrawal of KES {pending['amount']} approved"}
