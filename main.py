@@ -9,14 +9,16 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import bcrypt
 
-# ---------------- APP SETUP ----------------
-DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a/mkobawallet"
+# ---------------- CONFIG ----------------
+DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a.singapore-postgres.render.com/mkobawallet"
+REFERRAL_BONUS_PERCENT = 10  # 10% bonus to referrer
 
+# ---------------- APP SETUP ----------------
 app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # adjust in production
+    allow_origins=["*"],  # Adjust in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,7 +57,6 @@ def hash_pwd(pw: str) -> str:
 def check_pwd(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
-
 # ---------------- COMMODITIES ----------------
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
@@ -68,7 +69,6 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-REFERRAL_BONUS_PERCENT = 10  # 10% bonus to referrer
 PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
 PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 
@@ -77,7 +77,6 @@ PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 # ---------------- REGISTER ----------------
 @app.post("/register")
@@ -107,9 +106,8 @@ def register(username: str = Form(...), phone: str = Form(...), password: str = 
     logger.info(f"User {username} registered successfully")
     return {"message": f"User {username} registered successfully. Pending approval."}
 
-
-# ---------------- APPROVE USER ----------------
-@app.post("/approve-user")
+# ---------------- APPROVE USER (ADMIN) ----------------
+@app.post("/admin/approve-user")
 def approve_user(username: str = Form(...)):
     db = SessionLocal()
     user = db.query(UserDB).filter(UserDB.username == username).first()
@@ -121,7 +119,6 @@ def approve_user(username: str = Form(...)):
     db.refresh(user)
     db.close()
     return {"message": f"User {username} approved successfully"}
-
 
 # ---------------- LOGIN ----------------
 @app.post("/login")
@@ -139,7 +136,6 @@ def login(username: str = Form(...), password: str = Form(...)):
         raise HTTPException(status_code=403, detail="Account not approved")
     db.close()
     return {"message": "Login successful", "username": username, "balance": user.balance, "earnings": user.earnings}
-
 
 # ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
@@ -159,7 +155,6 @@ def dashboard(username: str):
 
     db.close()
     return {"username": username, "balance": user.balance, "earnings": user.earnings, "investments": investments_status}
-
 
 # ---------------- INVESTMENT ----------------
 @app.post("/invest/request")
@@ -181,7 +176,6 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
     PENDING_INVESTMENTS[username] = {"commodity": commodity, "price": price}
     db.close()
     return {"message": f"Investment request for {commodity} created. Pending confirmation."}
-
 
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...)):
@@ -214,7 +208,6 @@ def invest_confirm(username: str = Form(...)):
     db.close()
     return {"message": f"Investment in {commodity} confirmed"}
 
-
 # ---------------- WITHDRAWAL ----------------
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
@@ -233,8 +226,7 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
 
     PENDING_WITHDRAWALS[username] = {"amount": amount}
     db.close()
-    return {"message": f"Withdrawal request for KES {amount} created. Pending confirmation."}
-
+    return {"message": f"Withdrawal request for KES {amount} created. Pending approval."}
 
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...)):
@@ -255,3 +247,30 @@ def withdraw_confirm(username: str = Form(...)):
     db.refresh(user)
     db.close()
     return {"message": f"Withdrawal of KES {amount} successful"}
+
+# ---------------- ADMIN DASHBOARD ----------------
+@app.get("/admin/users")
+def admin_list_users():
+    db = SessionLocal()
+    users = db.query(UserDB).all()
+    db.close()
+    return [{"username": u.username, "approved": u.approved, "balance": u.balance, "earnings": u.earnings} for u in users]
+
+@app.post("/admin/approve-withdrawal")
+def admin_approve_withdrawal(username: str = Form(...)):
+    db = SessionLocal()
+    user = db.query(UserDB).filter(UserDB.username == username).first()
+    pending = PENDING_WITHDRAWALS.pop(username, None)
+    if not user or not pending:
+        db.close()
+        raise HTTPException(status_code=400, detail="No pending withdrawal or user not found")
+
+    if user.balance < pending["amount"]:
+        db.close()
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+
+    user.balance -= pending["amount"]
+    db.commit()
+    db.refresh(user)
+    db.close()
+    return {"message": f"Withdrawal of KES {pending['amount']} approved by admin"}
