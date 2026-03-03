@@ -1,21 +1,22 @@
-import time
 import secrets
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import bcrypt
 
-# ---------------- APP SETUP ----------------
+# ==========================================================
+# APP SETUP
+# ==========================================================
 
 app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # adjust in prod to specific frontend URL
+    allow_origins=["*"],  # CHANGE in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -24,19 +25,22 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mkoba-backend")
 
-# ---------------- STORAGE ----------------
+# ==========================================================
+# CONFIG
+# ==========================================================
+
+ADMIN_SECRET = "admin123"  # CHANGE THIS
+REFERRAL_PERCENT = 0.10
+
+# ==========================================================
+# DEMO STORAGE (NOT FOR PRODUCTION)
+# ==========================================================
 
 users: Dict[str, Dict[str, Any]] = {}
-otps: Dict[str, Tuple[str, float]] = {}  # otp, expiration timestamp
-pending_investments: Dict[str, Dict[str, Any]] = {}
-pending_withdrawals: Dict[str, Dict[str, Any]] = {}
 
-# ---------------- CONFIG ----------------
-
-OTP_LENGTH = 6
-OTP_TTL_SECONDS = 300  # 5 minutes
-
-# ---------------- COMMODITIES ----------------
+# ==========================================================
+# COMMODITIES
+# ==========================================================
 
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
@@ -49,53 +53,60 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-# ---------------- MODELS ----------------
+# ==========================================================
+# MODELS
+# ==========================================================
 
 class User(BaseModel):
     username: str
     phone: str
     password_hash: str
     approved: bool = False
+
     balance: float = 10000.0
     earnings: float = 0.0
     investments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    referral: str = ""
-    bonus_days_remaining: int = 0
 
-# ---------------- HELPERS ----------------
+    referral_code: str = ""
+    referred_by: str = ""
+    referral_earnings: float = 0.0
 
-def hash_pwd(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
-def check_pwd(pw: str, hashed: str) -> bool:
-    return bcrypt.checkpw(pw.encode(), hashed.encode())
+# ==========================================================
+# HELPERS
+# ==========================================================
 
-def generate_otp() -> str:
-    return ''.join(secrets.choice("0123456789") for _ in range(OTP_LENGTH))
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-def store_otp(key: str, otp: str):
-    expire_time = time.time() + OTP_TTL_SECONDS
-    otps[key] = (otp, expire_time)
 
-def verify_otp(key: str, otp: str) -> bool:
-    if key not in otps:
-        return False
-    stored_otp, expire_time = otps[key]
-    if time.time() > expire_time:
-        del otps[key]
-        return False
-    if stored_otp != otp:
-        return False
-    del otps[key]  # OTP consumed after successful verification
-    return True
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
-# ---------------- HEALTH ----------------
+
+def generate_referral_code() -> str:
+    return secrets.token_hex(4)
+
+
+def find_user_by_referral_code(code: str):
+    for user in users.values():
+        if user["referral_code"] == code:
+            return user
+    return None
+
+
+# ==========================================================
+# HEALTH
+# ==========================================================
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# ---------------- REGISTER ----------------
+
+# ==========================================================
+# REGISTER
+# ==========================================================
 
 @app.post("/register")
 def register(
@@ -105,52 +116,68 @@ def register(
     referral: str = Form("")
 ):
     if username in users:
-        logger.warning(f"Registration failed: Username {username} exists.")
         raise HTTPException(status_code=400, detail="Username already exists")
 
-    user = User(
+    referral_code = generate_referral_code()
+
+    new_user = User(
         username=username,
         phone=phone,
-        password_hash=hash_pwd(password),
-        referral=referral
+        password_hash=hash_password(password),
+        referral_code=referral_code,
+        referred_by=referral
     )
 
-    users[username] = user.dict()
+    users[username] = new_user.dict()
 
-    otp = generate_otp()
-    store_otp(username, otp)
+    return {
+        "message": "Registration successful. Await admin approval.",
+        "referral_link": f"https://yourfrontend.com/register?ref={referral_code}"
+    }
 
-    logger.info(f"[OTP MOCK] Registration OTP for {username}: {otp}")
-    return {"message": f"User registered. OTP sent to {phone}."}
 
-# ---------------- VERIFY REGISTRATION ----------------
+# ==========================================================
+# ADMIN APPROVAL
+# ==========================================================
 
-@app.post("/verify-otp")
-def verify_registration(username: str = Form(...), otp: str = Form(...)):
+@app.post("/admin/approve")
+def approve_user(username: str = Form(...), admin_key: str = Form(...)):
+    if admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
     user = users.get(username)
     if not user:
-        logger.warning(f"Verification failed: User {username} not found.")
         raise HTTPException(status_code=404, detail="User not found")
 
-    if verify_otp(username, otp):
-        user["approved"] = True
-        logger.info(f"User {username} verified successfully.")
-        return {"message": "Account verified successfully"}
+    user["approved"] = True
 
-    logger.warning(f"Verification failed: Invalid or expired OTP for {username}.")
-    raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    return {"message": f"{username} approved successfully"}
 
-# ---------------- LOGIN ----------------
+
+@app.get("/admin/users")
+def list_users(admin_key: str):
+    if admin_key != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    return users
+
+
+# ==========================================================
+# LOGIN
+# ==========================================================
 
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     user = users.get(username)
+
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if not check_pwd(password, user["password_hash"]):
+
+    if not verify_password(password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Invalid password")
-    if not user.get("approved"):
-        raise HTTPException(status_code=403, detail="Account not verified")
+
+    if not user["approved"]:
+        raise HTTPException(status_code=403, detail="Account not approved")
 
     return {
         "message": "Login successful",
@@ -159,20 +186,25 @@ def login(username: str = Form(...), password: str = Form(...)):
         "earnings": user["earnings"]
     }
 
-# ---------------- DASHBOARD ----------------
+
+# ==========================================================
+# DASHBOARD
+# ==========================================================
 
 @app.get("/dashboard")
 def dashboard(username: str):
     user = users.get(username)
-    if not user or not user.get("approved"):
+
+    if not user or not user["approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
 
-    investments_status = {}
+    investment_data = {}
+
     for commodity, inv in user["investments"].items():
-        start = inv["start_date"]
-        expiry = inv["expiry_date"]
-        remaining_days = max((expiry - datetime.utcnow()).days, 0)
-        investments_status[commodity] = {
+        remaining_days = max(
+            (inv["expiry_date"] - datetime.utcnow()).days, 0
+        )
+        investment_data[commodity] = {
             "amount": inv["amount"],
             "days_remaining": remaining_days
         }
@@ -181,83 +213,91 @@ def dashboard(username: str):
         "username": username,
         "balance": user["balance"],
         "earnings": user["earnings"],
-        "investments": investments_status
+        "investments": investment_data
     }
 
-# ---------------- INVESTMENT ----------------
 
-@app.post("/invest/request")
-def invest_request(username: str = Form(...), commodity: str = Form(...)):
+# ==========================================================
+# INVEST
+# ==========================================================
+
+@app.post("/invest")
+def invest(username: str = Form(...), commodity: str = Form(...)):
     user = users.get(username)
-    if not user or not user.get("approved"):
+
+    if not user or not user["approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
+
     if commodity not in COMMODITY_INFO:
         raise HTTPException(status_code=400, detail="Invalid commodity")
 
     price = COMMODITY_INFO[commodity]["price"]
+
     if user["balance"] < price:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    otp = generate_otp()
-    store_otp(f"{username}_invest", otp)
-    pending_investments[username] = {"commodity": commodity, "price": price}
-
-    logger.info(f"[OTP MOCK] Investment OTP for {username}: {otp}")
-    return {"message": "OTP sent to confirm investment"}
-
-@app.post("/invest/confirm")
-def invest_confirm(username: str = Form(...), otp: str = Form(...)):
-    if not verify_otp(f"{username}_invest", otp):
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
-
-    pending = pending_investments.pop(username, None)
-    if not pending:
-        raise HTTPException(status_code=400, detail="No pending investment")
-
-    user = users[username]
-    commodity = pending["commodity"]
-    price = pending["price"]
+    # Deduct balance
     user["balance"] -= price
+
+    # Add investment
     user["investments"][commodity] = {
         "amount": price,
         "start_date": datetime.utcnow(),
-        "expiry_date": datetime.utcnow() + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
+        "expiry_date": datetime.utcnow() + timedelta(
+            days=COMMODITY_INFO[commodity]["expiry_days"]
+        )
     }
 
-    return {"message": f"Investment in {commodity} confirmed"}
+    # ---------- REFERRAL BONUS ----------
+    if user["referred_by"]:
+        referrer = find_user_by_referral_code(user["referred_by"])
+        if referrer:
+            bonus = price * REFERRAL_PERCENT
+            referrer["balance"] += bonus
+            referrer["referral_earnings"] += bonus
+    # ------------------------------------
 
-# ---------------- WITHDRAWAL ----------------
+    return {"message": f"Investment in {commodity} successful"}
 
-@app.post("/withdraw/request")
-def withdraw_request(username: str = Form(...), amount: float = Form(...)):
+
+# ==========================================================
+# WITHDRAW
+# ==========================================================
+
+@app.post("/withdraw")
+def withdraw(username: str = Form(...), amount: float = Form(...)):
     user = users.get(username)
-    if not user or not user.get("approved"):
+
+    if not user or not user["approved"]:
         raise HTTPException(status_code=403, detail="Account not approved")
 
-    if datetime.utcnow().weekday() != 0:  # Monday only
-        raise HTTPException(status_code=400, detail="Withdrawals allowed only on Monday")
+    if datetime.utcnow().weekday() != 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Withdrawals allowed only on Monday"
+        )
 
     if amount <= 0 or amount > user["balance"]:
-        raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+        raise HTTPException(status_code=400, detail="Invalid amount")
 
-    otp = generate_otp()
-    store_otp(f"{username}_withdraw", otp)
-    pending_withdrawals[username] = {"amount": amount}
-
-    logger.info(f"[OTP MOCK] Withdrawal OTP for {username}: {otp}")
-    return {"message": "OTP sent to confirm withdrawal"}
-
-@app.post("/withdraw/confirm")
-def withdraw_confirm(username: str = Form(...), otp: str = Form(...)):
-    if not verify_otp(f"{username}_withdraw", otp):
-        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
-
-    pending = pending_withdrawals.pop(username, None)
-    if not pending:
-        raise HTTPException(status_code=400, detail="No pending withdrawal")
-
-    user = users[username]
-    amount = pending["amount"]
     user["balance"] -= amount
 
     return {"message": f"Withdrawal of KES {amount} successful"}
+
+
+# ==========================================================
+# REFERRAL INFO
+# ==========================================================
+
+@app.get("/referral-info")
+def referral_info(username: str):
+    user = users.get(username)
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "referral_code": user["referral_code"],
+        "referral_link": f"https://yourfrontend.com/register?ref={user['referral_code']}",
+        "referral_earnings": user["referral_earnings"]
+    }
