@@ -4,7 +4,7 @@ from typing import Dict, Any
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import bcrypt
@@ -16,7 +16,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # adjust in production
+    allow_origins=["*"],  # In production, restrict to your frontend domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,7 +78,6 @@ PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 def health():
     return {"status": "ok"}
 
-
 # ---------------- REGISTER ----------------
 @app.post("/register")
 def register(
@@ -89,26 +88,23 @@ def register(
 ):
     db = SessionLocal()
     try:
-        # Validate inputs
-        if not username.strip() or not phone.strip() or not password:
+        username = username.strip()
+        phone = phone.strip()
+        referral = referral.strip()
+
+        if not username or not phone or not password:
             raise HTTPException(status_code=400, detail="All fields are required")
 
-        existing_user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-        if existing_user:
+        if db.query(UserDB).filter(UserDB.username == username).first():
             raise HTTPException(status_code=400, detail="Username already exists")
 
         hashed_pw = hash_pwd(password)
-        new_user = UserDB(
-            username=username.strip(),
-            phone=phone.strip(),
-            password_hash=hashed_pw,
-            referral=referral.strip()
-        )
+        new_user = UserDB(username=username, phone=phone, password_hash=hashed_pw, referral=referral)
         db.add(new_user)
 
-        # Handle referral bonus safely
+        # Handle referral bonus
         if referral:
-            ref_user = db.query(UserDB).filter(UserDB.username == referral.strip()).first()
+            ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
                 bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)
                 ref_user.balance += bonus
@@ -118,7 +114,6 @@ def register(
         db.refresh(new_user)
         logger.info(f"User {username} registered successfully")
         return {"message": f"User {username} registered successfully. Pending admin approval."}
-
     except HTTPException as e:
         db.rollback()
         raise e
@@ -128,7 +123,6 @@ def register(
         raise HTTPException(status_code=500, detail="Server error during registration")
     finally:
         db.close()
-
 
 # ---------------- LOGIN ----------------
 @app.post("/login")
@@ -146,7 +140,6 @@ def login(username: str = Form(...), password: str = Form(...)):
     finally:
         db.close()
 
-
 # ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
 def dashboard(username: str):
@@ -155,18 +148,15 @@ def dashboard(username: str):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-
         investments_status = {}
         for commodity, inv in (user.investments or {}).items():
             start = datetime.fromisoformat(inv["start_date"])
             expiry = datetime.fromisoformat(inv["expiry_date"])
             remaining_days = max((expiry - datetime.utcnow()).days, 0)
             investments_status[commodity] = {"amount": inv["amount"], "days_remaining": remaining_days}
-
         return {"username": username, "balance": user.balance, "earnings": user.earnings, "investments": investments_status}
     finally:
         db.close()
-
 
 # ---------------- INVESTMENT ----------------
 @app.post("/invest/request")
@@ -180,12 +170,10 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
             raise HTTPException(status_code=400, detail="Invalid commodity")
         if user.balance < COMMODITY_INFO[commodity]["price"]:
             raise HTTPException(status_code=400, detail="Insufficient balance")
-
         PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
         return {"message": f"Investment request for {commodity} created. Pending confirmation."}
     finally:
         db.close()
-
 
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...)):
@@ -195,13 +183,10 @@ def invest_confirm(username: str = Form(...)):
         pending = PENDING_INVESTMENTS.pop(username.strip(), None)
         if not user or not user.approved or not pending:
             raise HTTPException(status_code=400, detail="No pending investment or user not approved")
-
         price = pending["price"]
         commodity = pending["commodity"]
-
         if user.balance < price:
             raise HTTPException(status_code=400, detail="Insufficient balance")
-
         user.balance -= price
         investments = user.investments or {}
         investments[commodity] = {
@@ -216,7 +201,6 @@ def invest_confirm(username: str = Form(...)):
     finally:
         db.close()
 
-
 # ---------------- WITHDRAWAL ----------------
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
@@ -225,16 +209,14 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-        if datetime.utcnow().weekday() != 0:  # Monday only
+        if datetime.utcnow().weekday() != 0:
             raise HTTPException(status_code=400, detail="Withdrawals allowed only on Monday")
         if amount <= 0 or amount > user.balance:
             raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
-
         PENDING_WITHDRAWALS[username.strip()] = {"amount": amount}
         return {"message": f"Withdrawal request for KES {amount} created. Pending admin approval."}
     finally:
         db.close()
-
 
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...)):
@@ -244,11 +226,9 @@ def withdraw_confirm(username: str = Form(...)):
         pending = PENDING_WITHDRAWALS.pop(username.strip(), None)
         if not user or not user.approved or not pending:
             raise HTTPException(status_code=400, detail="No pending withdrawal or user not approved")
-
         amount = pending["amount"]
         if user.balance < amount:
             raise HTTPException(status_code=400, detail="Insufficient balance")
-
         user.balance -= amount
         db.commit()
         db.refresh(user)
@@ -256,17 +236,14 @@ def withdraw_confirm(username: str = Form(...)):
     finally:
         db.close()
 
-
 # ---------------- ADMIN ----------------
 ADMIN_PASSWORD = "PHIL4857"
-
 
 @app.post("/admin/login")
 def admin_login(password: str = Form(...)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid admin password")
     return {"message": "Admin login successful"}
-
 
 @app.get("/admin/users")
 def admin_list_users():
@@ -286,7 +263,6 @@ def admin_list_users():
     finally:
         db.close()
 
-
 @app.post("/admin/approve-user")
 def admin_approve_user(username: str = Form(...)):
     db = SessionLocal()
@@ -300,7 +276,6 @@ def admin_approve_user(username: str = Form(...)):
         return {"message": f"User {username} approved successfully"}
     finally:
         db.close()
-
 
 @app.post("/admin/approve-withdrawal")
 def admin_approve_withdrawal(username: str = Form(...)):
