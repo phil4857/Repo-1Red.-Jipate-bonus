@@ -16,7 +16,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict to your frontend domain
+    allow_origins=["*"],  # Restrict to your Vercel domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,7 +38,7 @@ class UserDB(Base):
     phone = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     approved = Column(Boolean, default=False)
-    balance = Column(Float, default=10000.0)
+    balance = Column(Float, default=0.0)           # ← Changed to 0.0 as requested
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
     referral = Column(String, default="")
@@ -84,7 +84,7 @@ def register(
     username: str = Form(...),
     phone: str = Form(...),
     password: str = Form(...),
-    referral: str = Form("")
+    referral: str = Form(default="")
 ):
     db = SessionLocal()
     try:
@@ -102,11 +102,11 @@ def register(
         new_user = UserDB(username=username, phone=phone, password_hash=hashed_pw, referral=referral)
         db.add(new_user)
 
-        # Handle referral bonus
+        # Referral bonus (added to referrer if exists)
         if referral:
             ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
-                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)
+                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)  # 0 since balance is now 0
                 ref_user.balance += bonus
                 logger.info(f"Referral bonus: {bonus} added to {ref_user.username}")
 
@@ -172,6 +172,11 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
             raise HTTPException(status_code=400, detail="Insufficient balance")
         PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
         return {"message": f"Investment request for {commodity} created. Pending confirmation."}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Investment request error: {e}")
+        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -198,6 +203,11 @@ def invest_confirm(username: str = Form(...)):
         db.commit()
         db.refresh(user)
         return {"message": f"Investment in {commodity} confirmed"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Investment confirm error: {e}")
+        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -209,12 +219,16 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-        if datetime.utcnow().weekday() != 0:
-            raise HTTPException(status_code=400, detail="Withdrawals allowed only on Monday")
+        # Daily withdrawals — no Monday restriction
         if amount <= 0 or amount > user.balance:
             raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
         PENDING_WITHDRAWALS[username.strip()] = {"amount": amount}
         return {"message": f"Withdrawal request for KES {amount} created. Pending admin approval."}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Withdrawal request error: {e}")
+        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -233,6 +247,11 @@ def withdraw_confirm(username: str = Form(...)):
         db.commit()
         db.refresh(user)
         return {"message": f"Withdrawal of KES {amount} successful"}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Withdrawal confirm error: {e}")
+        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
