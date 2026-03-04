@@ -16,7 +16,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your Vercel domain in production
+    allow_origins=["*"],  # Restrict to your frontend domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,7 +38,7 @@ class UserDB(Base):
     phone = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     approved = Column(Boolean, default=False)
-    balance = Column(Float, default=0.0)           # ← Changed to 0.0 as requested
+    balance = Column(Float, default=0.0)           # ← Default 0 as requested
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
     referral = Column(String, default="")
@@ -102,11 +102,11 @@ def register(
         new_user = UserDB(username=username, phone=phone, password_hash=hashed_pw, referral=referral)
         db.add(new_user)
 
-        # Referral bonus (added to referrer if exists)
+        # Referral bonus
         if referral:
             ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
-                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)  # 0 since balance is now 0
+                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)
                 ref_user.balance += bonus
                 logger.info(f"Referral bonus: {bonus} added to {ref_user.username}")
 
@@ -172,11 +172,6 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
             raise HTTPException(status_code=400, detail="Insufficient balance")
         PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
         return {"message": f"Investment request for {commodity} created. Pending confirmation."}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Investment request error: {e}")
-        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -203,11 +198,6 @@ def invest_confirm(username: str = Form(...)):
         db.commit()
         db.refresh(user)
         return {"message": f"Investment in {commodity} confirmed"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Investment confirm error: {e}")
-        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -219,16 +209,11 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-        # Daily withdrawals — no Monday restriction
+        # Withdrawals allowed daily (no Monday restriction)
         if amount <= 0 or amount > user.balance:
             raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
         PENDING_WITHDRAWALS[username.strip()] = {"amount": amount}
         return {"message": f"Withdrawal request for KES {amount} created. Pending admin approval."}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Withdrawal request error: {e}")
-        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -247,11 +232,6 @@ def withdraw_confirm(username: str = Form(...)):
         db.commit()
         db.refresh(user)
         return {"message": f"Withdrawal of KES {amount} successful"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Withdrawal confirm error: {e}")
-        raise HTTPException(status_code=500, detail="Server error")
     finally:
         db.close()
 
@@ -310,5 +290,34 @@ def admin_approve_withdrawal(username: str = Form(...)):
         db.commit()
         db.refresh(user)
         return {"message": f"Withdrawal for {username} approved and processed"}
+    finally:
+        db.close()
+
+# ---------------- NEW: TERMINATE USER ----------------
+@app.post("/admin/terminate-user")
+def admin_terminate_user(username: str = Form(...)):
+    db = SessionLocal()
+    try:
+        user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Clean up pending data
+        PENDING_INVESTMENTS.pop(username.strip(), None)
+        PENDING_WITHDRAWALS.pop(username.strip(), None)
+
+        # Delete the user
+        db.delete(user)
+        db.commit()
+
+        logger.info(f"Admin terminated user: {username}")
+        return {"message": f"User {username} has been terminated and all data removed."}
+    except HTTPException as e:
+        db.rollback()
+        raise e
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Terminate user error: {e}")
+        raise HTTPException(status_code=500, detail="Server error during termination")
     finally:
         db.close()
