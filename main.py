@@ -38,7 +38,7 @@ class UserDB(Base):
     phone = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     approved = Column(Boolean, default=False)
-    balance = Column(Float, default=0.0)           # ← Default 0 as requested
+    balance = Column(Float, default=0.0)           # Default 0.0
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
     referral = Column(String, default="")
@@ -68,7 +68,9 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-REFERRAL_BONUS_PERCENT = 10  # 10% bonus to referrer
+MPESA_NUMBER = "0752964507"  # For buying commodities
+
+REFERRAL_BONUS_PERCENT = 10
 PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
 PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 
@@ -106,7 +108,7 @@ def register(
         if referral:
             ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
-                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)
+                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)  # 0 since balance is 0
                 ref_user.balance += bonus
                 logger.info(f"Referral bonus: {bonus} added to {ref_user.username}")
 
@@ -149,12 +151,25 @@ def dashboard(username: str):
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
         investments_status = {}
+        daily_earnings = 0.0
         for commodity, inv in (user.investments or {}).items():
             start = datetime.fromisoformat(inv["start_date"])
             expiry = datetime.fromisoformat(inv["expiry_date"])
             remaining_days = max((expiry - datetime.utcnow()).days, 0)
-            investments_status[commodity] = {"amount": inv["amount"], "days_remaining": remaining_days}
-        return {"username": username, "balance": user.balance, "earnings": user.earnings, "investments": investments_status}
+            daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+            daily_earnings += daily_rate
+            investments_status[commodity] = {
+                "amount": inv["amount"],
+                "days_remaining": remaining_days,
+                "daily_earning": daily_rate
+            }
+        return {
+            "username": username,
+            "balance": user.balance,
+            "earnings": user.earnings,
+            "investments": investments_status,
+            "daily_earnings": daily_earnings  # For min withdrawal check
+        }
     finally:
         db.close()
 
@@ -171,7 +186,10 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
         if user.balance < COMMODITY_INFO[commodity]["price"]:
             raise HTTPException(status_code=400, detail="Insufficient balance")
         PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
-        return {"message": f"Investment request for {commodity} created. Pending confirmation."}
+        return {
+            "message": f"Investment request for {commodity} created. Pending confirmation.",
+            "mpesa_payment": f"Send KES {COMMODITY_INFO[commodity]['price']} to M-Pesa: 0752964507"
+        }
     finally:
         db.close()
 
@@ -209,9 +227,18 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-        # Withdrawals allowed daily (no Monday restriction)
-        if amount <= 0 or amount > user.balance:
-            raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+
+        # Calculate current daily earnings from active investments
+        daily_earnings = 0.0
+        for commodity, inv in (user.investments or {}).items():
+            expiry = datetime.fromisoformat(inv["expiry_date"])
+            if datetime.utcnow() < expiry:
+                daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+                daily_earnings += daily_rate
+
+        if amount <= 0 or amount > daily_earnings:
+            raise HTTPException(status_code=400, detail=f"Withdrawal amount must be between 0 and your current daily earnings (KES {daily_earnings:.2f})")
+
         PENDING_WITHDRAWALS[username.strip()] = {"amount": amount}
         return {"message": f"Withdrawal request for KES {amount} created. Pending admin approval."}
     finally:
@@ -293,7 +320,6 @@ def admin_approve_withdrawal(username: str = Form(...)):
     finally:
         db.close()
 
-# ---------------- NEW: TERMINATE USER ----------------
 @app.post("/admin/terminate-user")
 def admin_terminate_user(username: str = Form(...)):
     db = SessionLocal()
@@ -306,18 +332,11 @@ def admin_terminate_user(username: str = Form(...)):
         PENDING_INVESTMENTS.pop(username.strip(), None)
         PENDING_WITHDRAWALS.pop(username.strip(), None)
 
-        # Delete the user
+        # Delete user
         db.delete(user)
         db.commit()
 
         logger.info(f"Admin terminated user: {username}")
         return {"message": f"User {username} has been terminated and all data removed."}
-    except HTTPException as e:
-        db.rollback()
-        raise e
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Terminate user error: {e}")
-        raise HTTPException(status_code=500, detail="Server error during termination")
     finally:
         db.close()
