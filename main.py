@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any
+import secrets
+import string
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,7 +18,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your frontend domain in production
+    allow_origins=["*"],  # Restrict to your Vercel domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,7 +40,7 @@ class UserDB(Base):
     phone = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     approved = Column(Boolean, default=False)
-    balance = Column(Float, default=0.0)           # Default 0.0
+    balance = Column(Float, default=0.0)           # ← Default 0.0
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
     referral = Column(String, default="")
@@ -104,7 +106,7 @@ def register(
         new_user = UserDB(username=username, phone=phone, password_hash=hashed_pw, referral=referral)
         db.add(new_user)
 
-        # Referral bonus
+        # Referral bonus (added to referrer if exists)
         if referral:
             ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
@@ -150,25 +152,26 @@ def dashboard(username: str):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
+
         investments_status = {}
         daily_earnings = 0.0
         for commodity, inv in (user.investments or {}).items():
-            start = datetime.fromisoformat(inv["start_date"])
             expiry = datetime.fromisoformat(inv["expiry_date"])
-            remaining_days = max((expiry - datetime.utcnow()).days, 0)
-            daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
-            daily_earnings += daily_rate
-            investments_status[commodity] = {
-                "amount": inv["amount"],
-                "days_remaining": remaining_days,
-                "daily_earning": daily_rate
-            }
+            if datetime.utcnow() < expiry:
+                daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+                daily_earnings += daily_rate
+                investments_status[commodity] = {
+                    "amount": inv["amount"],
+                    "days_remaining": max((expiry - datetime.utcnow()).days, 0),
+                    "daily_earning": daily_rate
+                }
+
         return {
             "username": username,
             "balance": user.balance,
             "earnings": user.earnings,
             "investments": investments_status,
-            "daily_earnings": daily_earnings  # For min withdrawal check
+            "daily_earnings": daily_earnings  # Used for min withdrawal
         }
     finally:
         db.close()
@@ -188,7 +191,7 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
         PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
         return {
             "message": f"Investment request for {commodity} created. Pending confirmation.",
-            "mpesa_payment": f"Send KES {COMMODITY_INFO[commodity]['price']} to M-Pesa: 0752964507"
+            "mpesa_payment": f"Send KES {COMMODITY_INFO[commodity]['price']} to M-Pesa: {MPESA_NUMBER}"
         }
     finally:
         db.close()
@@ -338,5 +341,25 @@ def admin_terminate_user(username: str = Form(...)):
 
         logger.info(f"Admin terminated user: {username}")
         return {"message": f"User {username} has been terminated and all data removed."}
+    finally:
+        db.close()
+
+@app.post("/admin/reset-password")
+def admin_reset_password(username: str = Form(...)):
+    db = SessionLocal()
+    try:
+        user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Generate random 8-character password
+        new_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+
+        user.password_hash = hash_pwd(new_password)
+        db.commit()
+        db.refresh(user)
+
+        logger.info(f"Admin reset password for {username}")
+        return {"message": "Password reset successful", "new_password": new_password}
     finally:
         db.close()
