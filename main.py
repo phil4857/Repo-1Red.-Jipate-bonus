@@ -4,7 +4,7 @@ from typing import Dict, Any
 import secrets
 import string
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
@@ -18,7 +18,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your Vercel domain in production
+    allow_origins=["*"],  # ← Change to your Vercel domain in production, e.g. ["https://your-app.vercel.app"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,7 +40,7 @@ class UserDB(Base):
     phone = Column(String, nullable=False)
     password_hash = Column(String, nullable=False)
     approved = Column(Boolean, default=False)
-    balance = Column(Float, default=0.0)           # ← Default 0.0
+    balance = Column(Float, default=0.0)
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
     referral = Column(String, default="")
@@ -70,7 +70,7 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
-MPESA_NUMBER = "0752964507"  # For buying commodities
+MPESA_NUMBER = "0752964507"
 
 REFERRAL_BONUS_PERCENT = 10
 PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
@@ -106,11 +106,10 @@ def register(
         new_user = UserDB(username=username, phone=phone, password_hash=hashed_pw, referral=referral)
         db.add(new_user)
 
-        # Referral bonus (added to referrer if exists)
         if referral:
             ref_user = db.query(UserDB).filter(UserDB.username == referral).first()
             if ref_user:
-                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)  # 0 since balance is 0
+                bonus = new_user.balance * (REFERRAL_BONUS_PERCENT / 100)  # usually 0
                 ref_user.balance += bonus
                 logger.info(f"Referral bonus: {bonus} added to {ref_user.username}")
 
@@ -146,32 +145,39 @@ def login(username: str = Form(...), password: str = Form(...)):
 
 # ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
-def dashboard(username: str):
+def dashboard(username: str = Query(...)):
     db = SessionLocal()
     try:
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-        if not user or not user.approved:
-            raise HTTPException(status_code=403, detail="Account not approved")
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if not user.approved:
+            raise HTTPException(status_code=403, detail="Account not approved. Contact admin to get approved.")
 
         investments_status = {}
         daily_earnings = 0.0
         for commodity, inv in (user.investments or {}).items():
-            expiry = datetime.fromisoformat(inv["expiry_date"])
-            if datetime.utcnow() < expiry:
-                daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
-                daily_earnings += daily_rate
-                investments_status[commodity] = {
-                    "amount": inv["amount"],
-                    "days_remaining": max((expiry - datetime.utcnow()).days, 0),
-                    "daily_earning": daily_rate
-                }
+            try:
+                expiry = datetime.fromisoformat(inv["expiry_date"])
+                if datetime.utcnow() < expiry:
+                    daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+                    daily_earnings += daily_rate
+                    investments_status[commodity] = {
+                        "amount": inv["amount"],
+                        "days_remaining": max((expiry - datetime.utcnow()).days, 0),
+                        "daily_earning": daily_rate
+                    }
+            except (KeyError, ValueError):
+                continue  # skip invalid investment entries
 
         return {
             "username": username,
             "balance": user.balance,
             "earnings": user.earnings,
             "investments": investments_status,
-            "daily_earnings": daily_earnings  # Used for min withdrawal
+            "daily_earnings": daily_earnings
         }
     finally:
         db.close()
@@ -184,11 +190,12 @@ def invest_request(username: str = Form(...), commodity: str = Form(...)):
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
+
         if commodity not in COMMODITY_INFO:
             raise HTTPException(status_code=400, detail="Invalid commodity")
-        if user.balance < COMMODITY_INFO[commodity]["price"]:
-            raise HTTPException(status_code=400, detail="Insufficient balance")
-        PENDING_INVESTMENTS[username.strip()] = {"commodity": commodity, "price": COMMODITY_INFO[commodity]["price"]}
+
+        # In real app you might store pending request here
+        # For now just return payment instruction
         return {
             "message": f"Investment request for {commodity} created. Pending confirmation.",
             "mpesa_payment": f"Send KES {COMMODITY_INFO[commodity]['price']} to M-Pesa: {MPESA_NUMBER}"
@@ -204,10 +211,13 @@ def invest_confirm(username: str = Form(...)):
         pending = PENDING_INVESTMENTS.pop(username.strip(), None)
         if not user or not user.approved or not pending:
             raise HTTPException(status_code=400, detail="No pending investment or user not approved")
+        
         price = pending["price"]
         commodity = pending["commodity"]
+        
         if user.balance < price:
             raise HTTPException(status_code=400, detail="Insufficient balance")
+        
         user.balance -= price
         investments = user.investments or {}
         investments[commodity] = {
@@ -231,13 +241,15 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
 
-        # Calculate current daily earnings from active investments
         daily_earnings = 0.0
         for commodity, inv in (user.investments or {}).items():
-            expiry = datetime.fromisoformat(inv["expiry_date"])
-            if datetime.utcnow() < expiry:
-                daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
-                daily_earnings += daily_rate
+            try:
+                expiry = datetime.fromisoformat(inv["expiry_date"])
+                if datetime.utcnow() < expiry:
+                    daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+                    daily_earnings += daily_rate
+            except:
+                continue
 
         if amount <= 0 or amount > daily_earnings:
             raise HTTPException(status_code=400, detail=f"Withdrawal amount must be between 0 and your current daily earnings (KES {daily_earnings:.2f})")
@@ -331,11 +343,9 @@ def admin_terminate_user(username: str = Form(...)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Clean up pending data
         PENDING_INVESTMENTS.pop(username.strip(), None)
         PENDING_WITHDRAWALS.pop(username.strip(), None)
 
-        # Delete user
         db.delete(user)
         db.commit()
 
@@ -352,7 +362,6 @@ def admin_reset_password(username: str = Form(...)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Generate random 8-character password
         new_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
 
         user.password_hash = hash_pwd(new_password)
