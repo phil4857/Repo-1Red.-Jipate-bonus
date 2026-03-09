@@ -16,9 +16,15 @@ DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@d
 
 app = FastAPI(title="Mkoba Wallet Backend")
 
+# Replace with your Vercel domain for production; keep '*' for testing
+origins = [
+    "*",
+    # "https://your-frontend.vercel.app",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,7 +63,6 @@ def hash_pwd(pw: str) -> str:
 def check_pwd(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
-
 # ---------------- COMMODITIES ----------------
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
@@ -71,18 +76,14 @@ COMMODITY_INFO = {
 }
 
 MPESA_NUMBER = "0752964507"
-
 REFERRAL_BONUS_PERCENT = 10
-
 PENDING_INVESTMENTS: Dict[str, Dict[str, Any]] = {}
 PENDING_WITHDRAWALS: Dict[str, Dict[str, Any]] = {}
 
 # ---------------- ROUTES ----------------
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 # ---------------- REGISTER ----------------
 @app.post("/register")
@@ -118,13 +119,11 @@ def register(
     finally:
         db.close()
 
-
 # ---------------- LOGIN ----------------
 @app.post("/login")
 def login(username: str = Form(...), password: str = Form(...)):
     db = SessionLocal()
     try:
-
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
 
         if not user:
@@ -146,37 +145,24 @@ def login(username: str = Form(...), password: str = Form(...)):
     finally:
         db.close()
 
-
 # ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
 def dashboard(username: str = Query(...)):
-
     db = SessionLocal()
-
     try:
-
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
         if not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
 
         investments_status = {}
-
         daily_earnings = 0
-
         for commodity, inv in (user.investments or {}).items():
-
             expiry = datetime.fromisoformat(inv["expiry_date"])
-
             if datetime.utcnow() < expiry:
-
                 daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
-
                 daily_earnings += daily_rate
-
                 investments_status[commodity] = {
                     "amount": inv["amount"],
                     "days_remaining": max((expiry - datetime.utcnow()).days, 0),
@@ -194,72 +180,48 @@ def dashboard(username: str = Query(...)):
     finally:
         db.close()
 
-
 # ---------------- INVESTMENT ----------------
 @app.post("/invest/request")
 def invest_request(username: str = Form(...), commodity: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
         username = username.strip()
-
         user = db.query(UserDB).filter(UserDB.username == username).first()
 
         if not user or not user.approved:
             raise HTTPException(status_code=403, detail="Account not approved")
-
         if commodity not in COMMODITY_INFO:
             raise HTTPException(status_code=400, detail="Invalid commodity")
 
         price = COMMODITY_INFO[commodity]["price"]
+        PENDING_INVESTMENTS[username] = {"commodity": commodity, "price": price}
 
-        PENDING_INVESTMENTS[username] = {
-            "commodity": commodity,
-            "price": price
-        }
-
-        return {
-            "message": f"Investment request created.",
-            "price": price,
-            "mpesa_number": MPESA_NUMBER
-        }
+        return {"message": "Investment request created", "price": price, "mpesa_number": MPESA_NUMBER}
 
     finally:
         db.close()
 
-
 @app.post("/invest/confirm")
 def invest_confirm(username: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
         username = username.strip()
-
         user = db.query(UserDB).filter(UserDB.username == username).first()
-
         pending = PENDING_INVESTMENTS.pop(username, None)
 
         if not user or not pending:
             raise HTTPException(status_code=400, detail="No pending investment")
 
         commodity = pending["commodity"]
-
         price = pending["price"]
 
         investments = dict(user.investments or {})
-
         investments[commodity] = {
             "amount": price,
             "start_date": datetime.utcnow().isoformat(),
             "expiry_date": (datetime.utcnow() + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])).isoformat()
         }
-
         user.investments = investments
-
         db.commit()
 
         return {"message": f"Investment in {commodity} confirmed"}
@@ -267,161 +229,98 @@ def invest_confirm(username: str = Form(...)):
     finally:
         db.close()
 
-
 # ---------------- WITHDRAWAL ----------------
 @app.post("/withdraw/request")
 def withdraw_request(username: str = Form(...), amount: float = Form(...)):
-
     username = username.strip()
-
     PENDING_WITHDRAWALS[username] = {"amount": amount}
-
-    return {"message": f"Withdrawal request created. Awaiting admin approval."}
-
+    return {"message": "Withdrawal request created. Awaiting admin approval."}
 
 @app.post("/withdraw/confirm")
 def withdraw_confirm(username: str = Form(...)):
-
     username = username.strip()
-
     pending = PENDING_WITHDRAWALS.get(username)
-
     if not pending:
         raise HTTPException(status_code=400, detail="No pending withdrawal")
-
     return {"message": "Withdrawal request submitted. Waiting for admin approval."}
-
 
 # ---------------- ADMIN ----------------
 ADMIN_PASSWORD = "PHIL4857"
 
-
 @app.post("/admin/login")
 def admin_login(password: str = Form(...)):
-
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid admin password")
-
     return {"message": "Admin login successful"}
-
 
 @app.get("/admin/users")
 def admin_list_users():
-
     db = SessionLocal()
-
     try:
-
         users = db.query(UserDB).all()
-
         return [
-            {
-                "username": u.username,
-                "phone": u.phone,
-                "approved": u.approved,
-                "balance": u.balance,
-                "earnings": u.earnings,
-                "referral": u.referral
-            }
+            {"username": u.username, "phone": u.phone, "approved": u.approved,
+             "balance": u.balance, "earnings": u.earnings, "referral": u.referral}
             for u in users
         ]
-
     finally:
         db.close()
-
 
 @app.post("/admin/approve-user")
 def admin_approve_user(username: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
         user.approved = True
-
         db.commit()
-
         return {"message": f"User {username} approved"}
-
     finally:
         db.close()
-
 
 @app.post("/admin/approve-withdrawal")
 def admin_approve_withdrawal(username: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
-        username = username.strip()
-
         user = db.query(UserDB).filter(UserDB.username == username).first()
-
         pending = PENDING_WITHDRAWALS.pop(username, None)
-
         if not user or not pending:
             raise HTTPException(status_code=400, detail="No pending withdrawal")
-
         user.balance -= pending["amount"]
-
         db.commit()
-
         return {"message": f"Withdrawal approved for {username}"}
-
     finally:
         db.close()
-
 
 @app.post("/admin/terminate-user")
 def admin_terminate_user(username: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
         db.delete(user)
-
         db.commit()
-
         return {"message": f"User {username} terminated"}
-
     finally:
         db.close()
-
 
 @app.post("/admin/reset-password")
 def admin_reset_password(username: str = Form(...)):
-
     db = SessionLocal()
-
     try:
-
         user = db.query(UserDB).filter(UserDB.username == username.strip()).first()
-
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-
         new_password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
-
         user.password_hash = hash_pwd(new_password)
-
         db.commit()
-
-        return {
-            "message": "Password reset successful",
-            "new_password": new_password
-        }
-
+        return {"message": "Password reset successful", "new_password": new_password}
     finally:
         db.close()
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
