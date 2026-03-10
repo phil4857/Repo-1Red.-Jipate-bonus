@@ -10,20 +10,25 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, J
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import bcrypt
+from os import getenv
 
 # ---------------- APP SETUP ----------------
-DATABASE_URL = "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a.singapore-postgres.render.com/mkobawallet"
+DATABASE_URL = getenv("DATABASE_URL", "postgresql://mkobawallet_user:HjhGTY2y8VBADx52gGS2Eom3mngX41lt@dpg-d6jesmdm5p6s73dnkda0-a.singapore-postgres.render.com/mkobawallet")
 
 app = FastAPI(title="Mkoba Wallet Backend")
 
-origins = ["*"]  # Change to your Vercel domain in production for security
+# Secure CORS - replace with your frontend URL in production
+origins = [
+    "https://mkobawallets.vercel.app",
+    "http://localhost:3000",  # for development
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -62,13 +67,11 @@ Base.metadata.create_all(bind=engine)
 REFERRAL_BONUS_PERCENT = 10
 MPESA_NUMBER = "0752964507"
 
-# ---------------- HELPERS ----------------
-def hash_pwd(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+ADMIN_PASSWORD = getenv("ADMIN_PASSWORD")
+if not ADMIN_PASSWORD:
+    raise RuntimeError("ADMIN_PASSWORD environment variable is required for security.")
 
-def check_pwd(pw: str, hashed: str) -> bool:
-    return bcrypt.checkpw(pw.encode(), hashed.encode())
-
+# Commodity info
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
     "crude_oil": {"price": 800, "expiry_days": 20},
@@ -80,9 +83,20 @@ COMMODITY_INFO = {
     "uranium": {"price": 3000, "expiry_days": 45},
 }
 
+# ---------------- HELPERS ----------------
+def hash_pwd(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def check_pwd(pw: str, hashed: str) -> bool:
+    return bcrypt.checkpw(pw.encode(), hashed.encode())
+
 # ---------------- ROUTES ----------------
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "Mkoba Wallet API is running"}
+
 @app.get("/health")
-def health():
+async def health():
     return {"status": "ok"}
 
 # ---------------- REGISTER ----------------
@@ -170,16 +184,32 @@ def dashboard(username: str = Query(...)):
 
         investments_status = {}
         daily_earnings = 0
-        for commodity, inv in (user.investments or {}).items():
+        now = datetime.utcnow()
+        investments = user.investments or {}
+
+        for commodity, inv in investments.items():
             expiry = datetime.fromisoformat(inv["expiry_date"])
-            if datetime.utcnow() < expiry:
+            start = datetime.fromisoformat(inv["start_date"])
+            if now < expiry:
                 daily_rate = inv["amount"] / COMMODITY_INFO[commodity]["expiry_days"]
+                days_passed = (now - start).days
+                last_credited = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
+                days_to_credit = (now - last_credited).days
+                if days_to_credit > 0:
+                    credit_amount = daily_rate * days_to_credit
+                    user.balance += credit_amount
+                    user.earnings += credit_amount
+                    inv["last_credited"] = now.isoformat()
+                    user.investments = investments  # Update
+
                 daily_earnings += daily_rate
                 investments_status[commodity] = {
                     "amount": inv["amount"],
-                    "days_remaining": max((expiry - datetime.utcnow()).days, 0),
+                    "days_remaining": max((expiry - now).days, 0),
                     "daily_earning": daily_rate
                 }
+
+        db.commit()  # Save any credited earnings
 
         return {
             "username": user.username,
@@ -235,10 +265,12 @@ def invest_confirm(username: str = Form(...), commodity: str = Form(...)):
         if commodity in investments:
             raise HTTPException(400, detail="Already invested in this commodity")
 
+        now = datetime.utcnow()
         investments[commodity] = {
             "amount": price,
-            "start_date": datetime.utcnow().isoformat(),
-            "expiry_date": (datetime.utcnow() + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])).isoformat()
+            "start_date": now.isoformat(),
+            "expiry_date": (now + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])).isoformat(),
+            "last_credited": now.isoformat()
         }
         user.investments = investments
 
@@ -283,8 +315,6 @@ def withdraw_request(username: str = Form(...), amount: float = Form(...)):
         db.close()
 
 # ---------------- ADMIN ----------------
-ADMIN_PASSWORD = "PHIL4857"
-
 @app.post("/admin/login")
 def admin_login(password: str = Form(...)):
     if password != ADMIN_PASSWORD:
