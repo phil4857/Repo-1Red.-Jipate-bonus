@@ -22,6 +22,7 @@ app = FastAPI(title="Mkoba Wallet Backend")
 
 origins = [
     "https://mkobawallets.vercel.app",
+    "https://repo-1red-jipate-bonus-1.onrender.com",
     "http://localhost:3000",
 ]
 
@@ -29,8 +30,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 logging.basicConfig(level=logging.INFO)
