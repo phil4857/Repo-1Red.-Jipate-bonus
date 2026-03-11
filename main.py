@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict
 import secrets
 import string
 import os
@@ -65,6 +65,8 @@ class WithdrawalRequest(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
     amount = Column(Float, nullable=False)
+    method = Column(String, default="MPESA")
+    account = Column(String, default="")
     status = Column(String, default="pending")
     requested_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
@@ -76,8 +78,6 @@ Base.metadata.create_all(bind=engine)
 
 REFERRAL_BONUS_PERCENT = 10
 MPESA_NUMBER = "0752964507"
-
-# Hardcoded admin password
 ADMIN_PASSWORD = "PHIL4857"
 
 COMMODITY_INFO = {
@@ -90,6 +90,7 @@ COMMODITY_INFO = {
     "gold": {"price": 2200, "expiry_days": 35},
     "uranium": {"price": 3000, "expiry_days": 45},
 }
+
 
 # ---------------- HELPERS ----------------
 
@@ -181,161 +182,6 @@ def login(username: str = Form(...), password: str = Form(...)):
         db.close()
 
 
-# ---------------- DASHBOARD ----------------
-
-@app.get("/dashboard")
-def dashboard(username: str = Query(...)):
-    db = SessionLocal()
-    try:
-        username = username.strip().lower()
-        user = db.query(UserDB).filter(UserDB.username == username).first()
-
-        if not user or not user.approved:
-            return {
-                "username": username,
-                "balance": 0.0,
-                "earnings": 0.0,
-                "investments": {},
-                "daily_earnings": 0.0,
-                "approved": False
-            }
-
-        investments = user.investments or {}
-        now = datetime.utcnow()
-        investments_status = {}
-        daily_earnings = 0
-
-        for commodity, inv in investments.items():
-            expiry = datetime.fromisoformat(inv["expiry_date"])
-            start = datetime.fromisoformat(inv["start_date"])
-
-            if now >= expiry:
-                continue
-
-            days = COMMODITY_INFO[commodity]["expiry_days"]
-            daily_rate = inv["amount"] / days
-
-            last_credited = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
-            days_to_credit = (now - last_credited).days
-
-            if days_to_credit > 0:
-                credit = daily_rate * days_to_credit
-                user.balance += credit
-                user.earnings += credit
-                inv["last_credited"] = now.isoformat()
-
-            investments_status[commodity] = {
-                "amount": inv["amount"],
-                "days_remaining": max((expiry - now).days, 0),
-                "daily_earning": daily_rate
-            }
-
-            daily_earnings += daily_rate
-
-        user.investments = investments
-        db.commit()
-
-        return {
-            "username": user.username,
-            "balance": user.balance,
-            "earnings": user.earnings,
-            "investments": investments_status,
-            "daily_earnings": daily_earnings,
-            "approved": user.approved,
-            "referral_link": f"https://mkobawallets.vercel.app/register.html?ref={user.username}",
-            "referral_bonus_earned": user.referral_bonus_earned
-        }
-    finally:
-        db.close()
-
-
-# ---------------- INVESTMENT ----------------
-
-@app.post("/invest/request")
-def invest_request(username: str = Form(...), commodity: str = Form(...)):
-    if commodity not in COMMODITY_INFO:
-        raise HTTPException(400, detail="Invalid commodity")
-
-    price = COMMODITY_INFO[commodity]["price"]
-
-    return {
-        "message": "Send payment to M-Pesa",
-        "price": price,
-        "mpesa_number": MPESA_NUMBER
-    }
-
-
-@app.post("/invest/confirm")
-def invest_confirm(username: str = Form(...), commodity: str = Form(...)):
-    db = SessionLocal()
-    try:
-        username = username.strip().lower()
-        user = db.query(UserDB).filter(UserDB.username == username).first()
-
-        if not user:
-            raise HTTPException(404, detail="User not found")
-
-        if commodity not in COMMODITY_INFO:
-            raise HTTPException(400, detail="Invalid commodity")
-
-        price = COMMODITY_INFO[commodity]["price"]
-        investments = dict(user.investments or {})
-
-        if commodity in investments:
-            raise HTTPException(400, detail="Already invested")
-
-        now = datetime.utcnow()
-        investments[commodity] = {
-            "amount": price,
-            "start_date": now.isoformat(),
-            "expiry_date": (now + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])).isoformat(),
-            "last_credited": now.isoformat()
-        }
-
-        user.investments = investments
-
-        if user.referral_code:
-            referrer = db.query(UserDB).filter(UserDB.username == user.referral_code).first()
-            if referrer:
-                bonus = price * (REFERRAL_BONUS_PERCENT / 100)
-                referrer.earnings += bonus
-                referrer.referral_bonus_earned += bonus
-
-        db.commit()
-        return {"message": f"Investment in {commodity} confirmed"}
-    finally:
-        db.close()
-
-
-# ---------------- WITHDRAW ----------------
-
-@app.post("/withdraw/request")
-def withdraw_request(username: str = Form(...), amount: float = Form(...)):
-    db = SessionLocal()
-    try:
-        username = username.strip().lower()
-        user = db.query(UserDB).filter(UserDB.username == username).first()
-
-        if not user:
-            raise HTTPException(404, detail="User not found")
-
-        if amount < 500:
-            raise HTTPException(400, detail="Minimum withdrawal is KES 500")
-
-        if user.balance < amount:
-            raise HTTPException(400, detail="Insufficient balance")
-
-        req = WithdrawalRequest(user_id=user.id, amount=amount)
-        db.add(req)
-        db.commit()
-
-        logger.info(f"Withdrawal requested: {username} KES {amount}")
-
-        return {"message": "Withdrawal request submitted"}
-    finally:
-        db.close()
-
-
 # ---------------- ADMIN ----------------
 
 @app.post("/admin/login")
@@ -352,6 +198,7 @@ def admin_users():
         users = db.query(UserDB).all()
         return [
             {
+                "id": u.id,
                 "username": u.username,
                 "phone": u.phone,
                 "approved": u.approved,
@@ -359,8 +206,7 @@ def admin_users():
                 "earnings": u.earnings,
                 "referral": u.referral_code,
                 "referral_bonus_earned": u.referral_bonus_earned
-            }
-            for u in users
+            } for u in users
         ]
     finally:
         db.close()
@@ -378,7 +224,9 @@ def admin_pending_withdrawals():
                 "id": r.id,
                 "username": user.username if user else "unknown",
                 "amount": r.amount,
-                "requested_at": r.requested_at
+                "method": r.method,
+                "account": r.account or MPESA_NUMBER,
+                "requested_at": r.requested_at.isoformat()
             })
         return results
     finally:
@@ -395,27 +243,6 @@ def approve_user(username: str = Form(...)):
         user.approved = True
         db.commit()
         return {"message": f"{username} approved"}
-    finally:
-        db.close()
-
-
-@app.post("/admin/approve-withdrawal")
-def approve_withdrawal(request_id: int = Form(...)):
-    db = SessionLocal()
-    try:
-        req = db.query(WithdrawalRequest).filter(WithdrawalRequest.id == request_id).first()
-        if not req or req.status != "pending":
-            raise HTTPException(400, detail="Invalid request")
-        user = db.query(UserDB).filter(UserDB.id == req.user_id).first()
-        if not user:
-            raise HTTPException(404, detail="User not found")
-        if user.balance < req.amount:
-            raise HTTPException(400, detail="Insufficient balance")
-        user.balance -= req.amount
-        req.status = "approved"
-        req.approved_at = datetime.utcnow()
-        db.commit()
-        return {"message": "Withdrawal approved"}
     finally:
         db.close()
 
@@ -449,9 +276,45 @@ def reset_password(username: str = Form(...)):
         db.close()
 
 
+@app.post("/admin/approve-withdrawal")
+def approve_withdrawal(request_id: int = Form(...)):
+    db = SessionLocal()
+    try:
+        req = db.query(WithdrawalRequest).filter(WithdrawalRequest.id == request_id, WithdrawalRequest.status=="pending").first()
+        if not req:
+            raise HTTPException(400, detail="Invalid request")
+        user = db.query(UserDB).filter(UserDB.id == req.user_id).first()
+        if not user:
+            raise HTTPException(404, detail="User not found")
+        if user.balance < req.amount:
+            raise HTTPException(400, detail="Insufficient balance")
+        user.balance -= req.amount
+        req.status = "approved"
+        req.approved_at = datetime.utcnow()
+        db.commit()
+        return {"message": "Withdrawal approved"}
+    finally:
+        db.close()
+
+
+@app.post("/admin/reject-withdrawal")
+def reject_withdrawal(request_id: int = Form(...)):
+    db = SessionLocal()
+    try:
+        req = db.query(WithdrawalRequest).filter(WithdrawalRequest.id == request_id, WithdrawalRequest.status=="pending").first()
+        if not req:
+            raise HTTPException(400, detail="Invalid request")
+        req.status = "rejected"
+        req.approved_at = datetime.utcnow()
+        db.commit()
+        return {"message": "Withdrawal rejected"}
+    finally:
+        db.close()
+
+
 # ---------------- RUN ----------------
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))  # Render provides PORT
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
