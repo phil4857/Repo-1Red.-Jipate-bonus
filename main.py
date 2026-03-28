@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, Field, constr, validator
+from pydantic import BaseModel, constr, validator
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 import bcrypt
@@ -13,7 +13,7 @@ import jwt
 
 # ---------------- CONFIG ----------------
 DATABASE_URL = "sqlite:///./test.db"
-SECRET_KEY = "CHANGE_THIS_SECRET"
+SECRET_KEY = "CHANGE_THIS_SECRET_TO_A_STRONG_RANDOM_VALUE_IN_PRODUCTION"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
@@ -115,7 +115,7 @@ class UserCreate(BaseModel):
     referral: Optional[str] = None
 
     @validator("username")
-    def lower(cls, v):
+    def lower_username(cls, v):
         return v.lower()
 
 class UserLogin(BaseModel):
@@ -126,13 +126,15 @@ class InvestRequest(BaseModel):
     commodity: str
 
 class WithdrawRequestSchema(BaseModel):
-    amount: float = Field(..., ge=0)
+    amount: float
 
-# ---------------- AUTH ----------------
+# ---------------- AUTH ROUTES ----------------
 @app.post("/register")
-def register(data: UserCreate, db: Session = Depends(get_db)):
+def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
+    print(f"[REGISTER] Received data: {data.dict()}")  # Debug log - check Render logs
+
     if db.query(UserDB).filter_by(username=data.username).first():
-        raise HTTPException(status_code=400, detail="Username exists")
+        raise HTTPException(status_code=400, detail="Username already exists")
 
     user = UserDB(
         username=data.username,
@@ -142,20 +144,24 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     )
     db.add(user)
     db.commit()
-    db.refresh(user)  # <- ensures user object is fresh
+    db.refresh(user)
 
     return {
-        "message": "Registered successfully. Await approval.",
-        "referral_link": f"https://mkobawallets.vercel.app/register.html?ref={data.username}"
+        "message": "Registered successfully. Await admin approval.",
+        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
     }
 
 @app.post("/login")
-def login(data: UserLogin, db: Session = Depends(get_db)):
+def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
+    print(f"[LOGIN] Received data: {data.dict()}")  # Debug log - check Render logs
+
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
     if not user or not check_pwd(data.password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+
     if not user.approved:
-        raise HTTPException(status_code=403, detail="Account not approved")
+        raise HTTPException(status_code=403, detail="Account not yet approved by admin")
+
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
@@ -205,7 +211,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
         "investments": inv_status,
         "daily_earnings": daily_earnings,
         "approved": user.approved,
-        "referral_link": f"https://mkobawallets.vercel.app/register.html?ref={user.username}",
+        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={user.username}",
         "referral_bonus_earned": user.referral_bonus_earned
     }
 
@@ -340,3 +346,8 @@ def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session
     db.commit()
     db.refresh(req)
     return {"message": "Withdrawal approved"}
+
+# ---------------- RUN ----------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
