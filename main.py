@@ -346,8 +346,9 @@ def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session
     db.commit()
     db.refresh(req)
     return {"message": "Withdrawal approved"}
-
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import os
+    port = int(os.getenv("PORT", 8000))   # Render uses $PORT (usually 10000), fallback to 8000 locally
+    uvicorn.run(app, host="0.0.0.0", port=port)
