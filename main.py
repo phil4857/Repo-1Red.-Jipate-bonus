@@ -1,7 +1,6 @@
 import os
-import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, status, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +17,6 @@ SECRET_KEY = "CHANGE_THIS_SECRET"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
-MPESA_NUMBER = "0752964507"
 REFERRAL_BONUS_PERCENT = 10
 
 COMMODITY_INFO = {
@@ -81,28 +79,33 @@ def get_db():
     finally:
         db.close()
 
-def hash_pwd(pw: str):
+def hash_pwd(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
-def check_pwd(pw: str, hashed: str):
+def check_pwd(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
-def create_token(data: dict):
+def create_token(data: dict) -> str:
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     data.update({"exp": expire})
     return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> UserDB:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user = db.query(UserDB).filter_by(username=payload.get("sub")).first()
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = db.query(UserDB).filter_by(username=username).first()
         if not user:
-            raise HTTPException(401, "User not found")
+            raise HTTPException(status_code=401, detail="User not found")
         return user
-    except:
-        raise HTTPException(401, "Invalid token")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 # ---------------- SCHEMAS ----------------
 class UserCreate(BaseModel):
@@ -129,7 +132,7 @@ class WithdrawRequestSchema(BaseModel):
 @app.post("/register")
 def register(data: UserCreate, db: Session = Depends(get_db)):
     if db.query(UserDB).filter_by(username=data.username).first():
-        raise HTTPException(400, "Username exists")
+        raise HTTPException(status_code=400, detail="Username exists")
 
     user = UserDB(
         username=data.username,
@@ -139,6 +142,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     )
     db.add(user)
     db.commit()
+    db.refresh(user)  # <- ensures user object is fresh
 
     return {
         "message": "Registered successfully. Await approval.",
@@ -148,13 +152,10 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 def login(data: UserLogin, db: Session = Depends(get_db)):
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
-
     if not user or not check_pwd(data.password, user.password_hash):
-        raise HTTPException(400, "Invalid credentials")
-
+        raise HTTPException(status_code=400, detail="Invalid credentials")
     if not user.approved:
-        raise HTTPException(403, "Account not approved")
-
+        raise HTTPException(status_code=403, detail="Account not approved")
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
@@ -178,7 +179,6 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
 
         days_total = COMMODITY_INFO[commodity]["expiry_days"]
         daily_rate = inv["amount"] / days_total
-
         days_to_credit = max((now - last).days, 0)
 
         if days_to_credit > 0:
@@ -192,11 +192,11 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             "days_remaining": max((expiry - now).days, 0),
             "daily_earning": daily_rate
         }
-
         daily_earnings += daily_rate
 
     db.add(user)
     db.commit()
+    db.refresh(user)
 
     return {
         "username": user.username,
@@ -213,33 +213,26 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
 @app.post("/invest/request")
 def invest_request(data: InvestRequest):
     if data.commodity not in COMMODITY_INFO:
-        raise HTTPException(400, "Invalid commodity")
-
-    return {
-        "message": "Send payment to M-Pesa",
-        "price": COMMODITY_INFO[data.commodity]["price"],
-        "mpesa_number": MPESA_NUMBER
-    }
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+    price = COMMODITY_INFO[data.commodity]["price"]
+    return {"message": "Send payment manually", "price": price}
 
 @app.post("/invest/confirm")
 def invest_confirm(data: InvestRequest, db: Session = Depends(get_db), user: UserDB = Depends(get_current_user)):
     if data.commodity not in COMMODITY_INFO:
-        raise HTTPException(400, "Invalid commodity")
-
-    if data.commodity in (user.investments or {}):
-        raise HTTPException(400, "Already invested")
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+    investments = user.investments or {}
+    if data.commodity in investments:
+        raise HTTPException(status_code=400, detail="Already invested")
 
     now = datetime.utcnow()
     price = COMMODITY_INFO[data.commodity]["price"]
-
-    investments = user.investments or {}
     investments[data.commodity] = {
         "amount": price,
         "start_date": now.isoformat(),
         "expiry_date": (now + timedelta(days=COMMODITY_INFO[data.commodity]["expiry_days"])).isoformat(),
         "last_credited": now.isoformat()
     }
-
     user.investments = investments
 
     # referral bonus
@@ -253,6 +246,7 @@ def invest_confirm(data: InvestRequest, db: Session = Depends(get_db), user: Use
 
     db.add(user)
     db.commit()
+    db.refresh(user)
 
     return {"message": "Investment confirmed"}
 
@@ -260,29 +254,26 @@ def invest_confirm(data: InvestRequest, db: Session = Depends(get_db), user: Use
 @app.post("/withdraw/request")
 def withdraw(data: WithdrawRequestSchema, user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.amount < 500:
-        raise HTTPException(400, "Minimum withdrawal is 500")
-
+        raise HTTPException(status_code=400, detail="Minimum withdrawal is 500")
     if user.balance < data.amount:
-        raise HTTPException(400, "Insufficient balance")
-
+        raise HTTPException(status_code=400, detail="Insufficient balance")
     req = WithdrawalRequest(user_id=user.id, amount=data.amount)
     db.add(req)
     db.commit()
-
+    db.refresh(req)
     return {"message": "Withdrawal requested"}
 
 # ---------------- ADMIN ----------------
 @app.post("/admin/login")
 def admin_login(password: str = Body(...)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     return {"message": "Admin login successful"}
 
 @app.post("/admin/users")
 def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     return [
         {
             "username": u.username,
@@ -297,62 +288,55 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
 @app.post("/admin/approve-user")
 def approve_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     user = db.query(UserDB).filter_by(username=username.lower()).first()
     if not user:
-        raise HTTPException(404, "User not found")
-
+        raise HTTPException(status_code=404, detail="User not found")
     user.approved = True
     db.commit()
-
+    db.refresh(user)
     return {"message": f"{username} approved"}
 
 @app.post("/admin/terminate-user")
 def terminate_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     user = db.query(UserDB).filter_by(username=username.lower()).first()
     if not user:
-        raise HTTPException(404, "User not found")
-
+        raise HTTPException(status_code=404, detail="User not found")
     db.delete(user)
     db.commit()
-
     return {"message": "User deleted"}
 
 @app.post("/admin/withdrawals")
 def withdrawals(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-
-    result = []
-    for r in db.query(WithdrawalRequest).filter_by(status="pending"):
-        u = db.query(UserDB).filter_by(id=r.user_id).first()
-        result.append({
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    return [
+        {
             "id": r.id,
-            "username": u.username,
+            "username": db.query(UserDB).filter_by(id=r.user_id).first().username,
             "amount": r.amount
-        })
-
-    return result
+        }
+        for r in db.query(WithdrawalRequest).filter_by(status="pending").all()
+    ]
 
 @app.post("/admin/withdraw/approve")
 def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
-        raise HTTPException(401, "Invalid admin password")
-
+        raise HTTPException(status_code=401, detail="Invalid admin password")
     req = db.query(WithdrawalRequest).filter_by(id=id).first()
     if not req:
-        raise HTTPException(404, "Not found")
-
+        raise HTTPException(status_code=404, detail="Withdrawal not found")
     user = db.query(UserDB).filter_by(id=req.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.balance < req.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
     user.balance -= req.amount
-
     req.status = "approved"
     req.approved_at = datetime.utcnow()
-
+    db.add(user)
     db.commit()
-
+    db.refresh(req)
     return {"message": "Withdrawal approved"}
