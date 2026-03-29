@@ -283,6 +283,7 @@ def admin_login(data: dict = Body(...)):
     
     return {"message": "Admin login successful"}
 
+
 @app.post("/admin/users")
 def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
@@ -290,7 +291,7 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     return [
         {
             "username": u.username,
-            "phone": u.phone,
+            "phone": u.phone,                    # ← Added this line
             "balance": u.balance,
             "earnings": u.earnings,
             "approved": u.approved,
@@ -298,7 +299,6 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
         }
         for u in db.query(UserDB).all()
     ]
-
 @app.post("/admin/approve-user")
 def approve_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
