@@ -270,6 +270,7 @@ def withdraw(data: WithdrawRequestSchema, user: UserDB = Depends(get_current_use
     return {"message": "Withdrawal requested"}
 
 # ---------------- ADMIN ----------------
+# ---------------- ADMIN ----------------
 @app.post("/admin/login")
 def admin_login(data: dict = Body(...)):
     password = data.get("password")
@@ -319,7 +320,6 @@ def reset_password(username: str = Body(...), password: str = Body(...), db: Ses
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Generate a new random password (10 characters)
     import random
     import string
     new_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
@@ -376,7 +376,6 @@ def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session
     db.commit()
     db.refresh(req)
     return {"message": "Withdrawal approved"}
-
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     import uvicorn
