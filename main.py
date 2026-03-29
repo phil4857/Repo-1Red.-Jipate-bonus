@@ -271,12 +271,15 @@ def withdraw(data: WithdrawRequestSchema, user: UserDB = Depends(get_current_use
 
 # ---------------- ADMIN ----------------
 @app.post("/admin/login")
-def admin_login(password: str = Body(...)):
+def admin_login(data: dict = Body(...)):
+    password = data.get("password")
+    
+    if not password or not isinstance(password, str):
+        raise HTTPException(status_code=422, detail="Input should be a valid string")
+    
     if password != ADMIN_PASSWORD:
-        raise HTTPException(
-            status_code=401, 
-            detail="Invalid admin password"
-        )
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
     return {"message": "Admin login successful"}
 
 @app.post("/admin/users")
