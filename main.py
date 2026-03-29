@@ -288,16 +288,21 @@ def admin_login(data: dict = Body(...)):
 def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    users = db.query(UserDB).all()
+    
+    print(f"DEBUG: Found {len(users)} users in database")  # This will show in Render Logs
+    
     return [
         {
             "username": u.username,
-            "phone": u.phone,                    # ← Added this line
+            "phone": u.phone,
             "balance": u.balance,
             "earnings": u.earnings,
             "approved": u.approved,
             "referral_bonus": u.referral_bonus_earned
         }
-        for u in db.query(UserDB).all()
+        for u in users
     ]
 @app.post("/admin/approve-user")
 def approve_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
