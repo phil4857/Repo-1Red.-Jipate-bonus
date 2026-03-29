@@ -289,6 +289,7 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     return [
         {
             "username": u.username,
+            "phone": u.phone,
             "balance": u.balance,
             "earnings": u.earnings,
             "approved": u.approved,
@@ -308,6 +309,29 @@ def approve_user(username: str = Body(...), password: str = Body(...), db: Sessi
     db.commit()
     db.refresh(user)
     return {"message": f"{username} approved"}
+
+@app.post("/admin/reset-password")
+def reset_password(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    user = db.query(UserDB).filter_by(username=username.lower()).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Generate a new random password (10 characters)
+    import random
+    import string
+    new_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    
+    user.password_hash = hash_pwd(new_password)
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "message": f"Password for {username} has been reset successfully",
+        "new_password": new_password
+    }
 
 @app.post("/admin/terminate-user")
 def terminate_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
@@ -352,6 +376,7 @@ def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session
     db.commit()
     db.refresh(req)
     return {"message": "Withdrawal approved"}
+
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     import uvicorn
