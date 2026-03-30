@@ -303,14 +303,14 @@ def admin_login(data: dict = Body(...)):
 
 
 # ====================== USERS ======================
-@admin_router.post("/users")
+@app.post("/admin/users")
 def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
     
     users = db.query(UserDB).all()
     
-    print(f"DEBUG: Found {len(users)} users in database")  # Check Render logs
+    print(f"DEBUG: Found {len(users)} users in database")   # Check Render logs for this
     
     return [
         {
