@@ -171,6 +171,12 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     return {"access_token": token, "token_type": "bearer"}
 
 # ---------------- ADMIN ROUTES (Fixed for your dashboard) ----------------
+# ---------------- ADMIN ROUTES (Updated with Withdrawals Approval) ----------------
+
+class AdminAction(BaseModel):
+    password: str
+    username: Optional[str] = None
+
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -224,7 +230,7 @@ def reset_password(data: AdminAction = Body(...), db: Session = Depends(get_db))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    user.password_hash = hash_pwd("123456")  # temporary password
+    user.password_hash = hash_pwd("123456")
     db.commit()
     return {"message": f"Password reset for {data.username} to '123456'"}
 
@@ -240,6 +246,56 @@ def terminate_user(data: AdminAction = Body(...), db: Session = Depends(get_db))
     db.delete(user)
     db.commit()
     return {"message": f"User {data.username} has been terminated"}
+
+# ==================== NEW: WITHDRAWAL ADMIN ROUTES ====================
+
+# List pending withdrawals
+@app.post("/admin/withdrawals")
+def get_withdrawals(data: dict = Body(...), db: Session = Depends(get_db)):
+    if data.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    withdrawals = db.query(WithdrawalRequest).all()
+    result = []
+    for w in withdrawals:
+        user = db.query(UserDB).filter_by(id=w.user_id).first()
+        result.append({
+            "id": w.id,
+            "username": user.username if user else "Unknown",
+            "amount": w.amount,
+            "status": w.status,
+            "requested_at": w.requested_at.isoformat() if w.requested_at else None
+        })
+    return result
+
+# Approve a withdrawal
+@app.post("/admin/withdraw_approve")
+def approve_withdrawal(data: dict = Body(...), db: Session = Depends(get_db)):
+    if data.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    withdrawal_id = data.get("withdrawal_id")
+    if not withdrawal_id:
+        raise HTTPException(status_code=400, detail="withdrawal_id is required")
+    
+    withdrawal = db.query(WithdrawalRequest).filter_by(id=withdrawal_id).first()
+    if not withdrawal:
+        raise HTTPException(status_code=404, detail="Withdrawal request not found")
+    
+    if withdrawal.status != "pending":
+        raise HTTPException(status_code=400, detail="Withdrawal already processed")
+    
+    # Approve the withdrawal
+    withdrawal.status = "approved"
+    withdrawal.approved_at = datetime.utcnow()
+    
+    # Add amount to user's balance (optional - you can remove if you handle balance elsewhere)
+    user = db.query(UserDB).filter_by(id=withdrawal.user_id).first()
+    if user:
+        user.balance -= withdrawal.amount   # Deduct from balance when approved
+    
+    db.commit()
+    return {"message": f"Withdrawal #{withdrawal_id} approved successfully"}
 
 # ---------------- DASHBOARD & INVEST (your existing code continued) ----------------
 @app.get("/dashboard")
