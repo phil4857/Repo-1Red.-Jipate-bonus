@@ -271,25 +271,7 @@ def withdraw(data: WithdrawRequestSchema, user: UserDB = Depends(get_current_use
 
 # ---------------- ADMIN ----------------
 # ---------------- ADMIN ----------------
-from fastapi import APIRouter, Body, HTTPException, Depends
-from sqlalchemy.orm import Session
-from datetime import datetime
-import random
-import string
-
-# Assuming these are already imported in your main file
-# from database import get_db
-# from models import UserDB, WithdrawalRequest
-# from utils import hash_pwd
-
-# Create a router (Recommended for better organization)
-admin_router = APIRouter(prefix="/admin", tags=["Admin"])
-
-ADMIN_PASSWORD = "PHIL4857"   # ← Later move this to environment variable
-
-
-# ====================== LOGIN ======================
-@admin_router.post("/login")
+@app.post("/admin/login")
 def admin_login(data: dict = Body(...)):
     password = data.get("password")
     
@@ -299,10 +281,9 @@ def admin_login(data: dict = Body(...)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
     
-    return {"message": "Admin login successful", "success": True}
+    return {"message": "Admin login successful"}
 
 
-# ====================== USERS ======================
 @app.post("/admin/users")
 def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
@@ -310,7 +291,7 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
     
     users = db.query(UserDB).all()
     
-    print(f"DEBUG: Found {len(users)} users in database")   # Check Render logs for this
+    print(f"DEBUG: Found {len(users)} users in database")  # This will show in Render Logs
     
     return [
         {
@@ -319,30 +300,23 @@ def admin_users(password: str = Body(...), db: Session = Depends(get_db)):
             "balance": u.balance,
             "earnings": u.earnings,
             "approved": u.approved,
-            "referral_bonus": getattr(u, "referral_bonus_earned", 0)
+            "referral_bonus": u.referral_bonus_earned
         }
         for u in users
     ]
-
-
-# ====================== APPROVE USER ======================
-@admin_router.post("/approve-user")
+@app.post("/admin/approve-user")
 def approve_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
     user = db.query(UserDB).filter_by(username=username.lower()).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
     user.approved = True
     db.commit()
     db.refresh(user)
-    return {"message": f"{username} approved successfully"}
+    return {"message": f"{username} approved"}
 
-
-# ====================== RESET PASSWORD ======================
-@admin_router.post("/reset-password")
+@app.post("/admin/reset-password")
 def reset_password(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
@@ -351,6 +325,8 @@ def reset_password(username: str = Body(...), password: str = Body(...), db: Ses
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    import random
+    import string
     new_password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
     
     user.password_hash = hash_pwd(new_password)
@@ -362,69 +338,52 @@ def reset_password(username: str = Body(...), password: str = Body(...), db: Ses
         "new_password": new_password
     }
 
-
-# ====================== TERMINATE USER ======================
-@admin_router.post("/terminate-user")
+@app.post("/admin/terminate-user")
 def terminate_user(username: str = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
     user = db.query(UserDB).filter_by(username=username.lower()).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
     db.delete(user)
     db.commit()
-    return {"message": f"{username} terminated successfully"}
+    return {"message": "User deleted"}
 
-
-# ====================== WITHDRAWALS ======================
-@admin_router.post("/withdrawals")
-def get_withdrawals(password: str = Body(...), db: Session = Depends(get_db)):
+@app.post("/admin/withdrawals")
+def withdrawals(password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    pending_requests = db.query(WithdrawalRequest).filter_by(status="pending").all()
-    
-    result = []
-    for r in pending_requests:
-        user = db.query(UserDB).filter_by(id=r.user_id).first()
-        result.append({
+    return [
+        {
             "id": r.id,
-            "username": user.username if user else "Unknown",
+            "username": db.query(UserDB).filter_by(id=r.user_id).first().username,
             "amount": r.amount
-        })
-    return result
+        }
+        for r in db.query(WithdrawalRequest).filter_by(status="pending").all()
+    ]
 
-
-# ====================== APPROVE WITHDRAWAL ======================
-@admin_router.post("/withdraw/approve")
+@app.post("/admin/withdraw/approve")
 def approve_withdraw(id: int = Body(...), password: str = Body(...), db: Session = Depends(get_db)):
     if password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
     req = db.query(WithdrawalRequest).filter_by(id=id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Withdrawal not found")
-    
     user = db.query(UserDB).filter_by(id=req.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
     if user.balance < req.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
-    
     user.balance -= req.amount
     req.status = "approved"
     req.approved_at = datetime.utcnow()
-    
+    db.add(user)
     db.commit()
     db.refresh(req)
-    
-    return {"message": "Withdrawal approved successfully"}
+    return {"message": "Withdrawal approved"}
 # ---------------- RUN ----------------
 if __name__ == "__main__":
     import uvicorn
-    import os
+    import 
     port = int(os.getenv("PORT", 8000))   # Render uses $PORT (usually 10000), fallback to 8000 locally
     uvicorn.run(app, host="0.0.0.0", port=port)
