@@ -128,48 +128,8 @@ class InvestRequest(BaseModel):
 class WithdrawRequestSchema(BaseModel):
     amount: float
 
-# ---------------- ADMIN ACTION SCHEMA ----------------
-class AdminAction(BaseModel):
-    password: str
-    username: Optional[str] = None
-
-# ---------------- AUTH ROUTES ----------------
-@app.post("/register")
-def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
-    print(f"[REGISTER] Received data: {data.dict()}")
-
-    if db.query(UserDB).filter_by(username=data.username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
-
-    user = UserDB(
-        username=data.username,
-        phone=data.phone,
-        password_hash=hash_pwd(data.password),
-        referral_code=data.referral.lower() if data.referral else None
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    return {
-        "message": "Registered successfully. Await admin approval.",
-        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
-    }
-
-@app.post("/login")
-def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
-    print(f"[LOGIN] Received data: {data.dict()}")
-
-    user = db.query(UserDB).filter_by(username=data.username.lower()).first()
-    if not user or not check_pwd(data.password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Invalid username or password")
-
-    if not user.approved:
-        raise HTTPException(status_code=403, detail="Account not yet approved by admin")
-
-    token = create_token({"sub": user.username})
-    return {"access_token": token, "token_type": "bearer"}
-# ---------------- CLEAN ADMIN ROUTES (Replace everything old with this) ----------------
+# ---------------- CLEAN ADMIN ROUTES (Fixed - only this part changed) ----------------
+# Removed duplicate AdminAction class and aligned perfectly with your frontend JS
 
 class AdminAction(BaseModel):
     password: str
@@ -283,6 +243,43 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
+
+# ---------------- AUTH ROUTES ----------------
+@app.post("/register")
+def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
+    print(f"[REGISTER] Received data: {data.dict()}")
+
+    if db.query(UserDB).filter_by(username=data.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    user = UserDB(
+        username=data.username,
+        phone=data.phone,
+        password_hash=hash_pwd(data.password),
+        referral_code=data.referral.lower() if data.referral else None
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Registered successfully. Await admin approval.",
+        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
+    }
+
+@app.post("/login")
+def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
+    print(f"[LOGIN] Received data: {data.dict()}")
+
+    user = db.query(UserDB).filter_by(username=data.username.lower()).first()
+    if not user or not check_pwd(data.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+
+    if not user.approved:
+        raise HTTPException(status_code=403, detail="Account not yet approved by admin")
+
+    token = create_token({"sub": user.username})
+    return {"access_token": token, "token_type": "bearer"}
 
 # ---------------- DASHBOARD & INVEST (your existing code continued) ----------------
 @app.get("/dashboard")
