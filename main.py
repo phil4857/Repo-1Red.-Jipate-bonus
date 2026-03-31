@@ -17,6 +17,7 @@ SECRET_KEY = "CHANGE_THIS_SECRET_TO_A_STRONG_RANDOM_VALUE_IN_PRODUCTION"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
+REFERRAL_BONUS_PERCENT = 10
 
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
@@ -28,6 +29,8 @@ COMMODITY_INFO = {
     "gold": {"price": 2200, "expiry_days": 35},
     "uranium": {"price": 3000, "expiry_days": 45},
 }
+
+MPESA_NUMBER = "0752964507"
 
 # ---------------- APP ----------------
 app = FastAPI(title="Mkoba Wallet Backend")
@@ -52,7 +55,7 @@ class UserDB(Base):
     username = Column(String, unique=True, index=True)
     phone = Column(String)
     password_hash = Column(String)
-    approved = Column(Boolean, default=True)   # Auto-approved on register
+    approved = Column(Boolean, default=True)
     balance = Column(Float, default=0.0)
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
@@ -129,8 +132,9 @@ class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
     withdrawal_id: Optional[int] = None
+    investment_commodity: Optional[str] = None
 
-# ---------------- CLEAN ADMIN ROUTES ----------------
+# ---------------- ADMIN ROUTES ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -151,19 +155,6 @@ def get_admin_users(data: dict = Body(...), db: Session = Depends(get_db)):
         "balance": u.balance,
         "earnings": u.earnings,
     } for u in users]
-
-@app.post("/admin/approve-user")
-def approve_user(data: AdminAction = Body(...), db: Session = Depends(get_db)):
-    if data.password != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    if not data.username:
-        raise HTTPException(status_code=400, detail="username is required")
-    user = db.query(UserDB).filter_by(username=data.username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-    user.approved = True
-    db.commit()
-    return {"message": f"User {data.username} approved successfully"}
 
 @app.post("/admin/reset-password")
 def reset_password(data: AdminAction = Body(...), db: Session = Depends(get_db)):
@@ -229,7 +220,45 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- AUTH ROUTES (UPDATED) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
+@app.post("/admin/approve-investment")
+def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
+    if data.password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    if not data.username or not data.investment_commodity:
+        raise HTTPException(status_code=400, detail="username and investment_commodity are required")
+    
+    user = db.query(UserDB).filter_by(username=data.username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
+    
+    investments = user.investments or {}
+    if data.investment_commodity not in investments:
+        raise HTTPException(status_code=404, detail="Investment not found")
+    
+    investment = investments[data.investment_commodity]
+    if investment.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="Investment already processed")
+    
+    investment["status"] = "approved"
+    investment["start_date"] = datetime.utcnow().isoformat()
+    investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
+    investment["last_credited"] = datetime.utcnow().isoformat()
+    
+    # Referral bonus when referred user invests
+    if user.referral_code:
+        referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
+        if referrer:
+            bonus = investment["amount"] * (REFERRAL_BONUS_PERCENT / 100)
+            referrer.referral_bonus_earned += bonus
+            referrer.balance += bonus
+            db.add(referrer)
+    
+    db.commit()
+    db.refresh(user)
+    return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully"}
+
+# ---------------- AUTH ROUTES ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     if db.query(UserDB).filter_by(username=data.username).first():
@@ -240,7 +269,7 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
         phone=data.phone,
         password_hash=hash_pwd(data.password),
         referral_code=data.referral.lower() if data.referral else None,
-        approved=True   # Direct access
+        approved=True
     )
     db.add(user)
     db.commit()
@@ -260,7 +289,7 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- INVEST REQUEST (PENDING) ----------------
+# ---------------- INVEST REQUEST (WITH MPESA) ----------------
 @app.post("/invest/request")
 def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.commodity not in COMMODITY_INFO:
@@ -271,7 +300,8 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
     investments = current_user.investments or {}
     investments[data.commodity] = {
         "amount": price,
-        "status": "pending",                    # Pending until admin approves
+        "status": "pending",
+        "payment_method": f"Pay via M-Pesa to {MPESA_NUMBER}",
         "requested_at": datetime.utcnow().isoformat()
     }
     current_user.investments = investments
@@ -279,13 +309,14 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
     db.refresh(current_user)
 
     return {
-        "message": f"Request for {data.commodity} submitted. Pending admin approval.",
+        "message": f"Request for {data.commodity} submitted.",
         "commodity": data.commodity,
         "price": price,
+        "payment_instruction": f"Pay KES {price} via M-Pesa to {MPESA_NUMBER}",
         "status": "pending"
     }
 
-# ---------------- DASHBOARD (original, untouched) ----------------
+# ---------------- DASHBOARD (ALL COMMODITIES + EXPIRY + DAILY EARNING + LIVE COUNTDOWN + LARGE DISTINCT EMOJIS) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
@@ -295,33 +326,62 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
 
     investments = user.investments or {}
 
-    for commodity, inv in investments.items():
-        if inv.get("status") != "approved":
-            continue  # skip pending
+    for commodity in COMMODITY_INFO:
+        inv = investments.get(commodity, {})
+        status = inv.get("status", "not_invested")
+        amount = inv.get("amount", 0)
 
-        try:
-            start = datetime.fromisoformat(inv["start_date"])
-            expiry = datetime.fromisoformat(inv["expiry_date"])
-            last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
-        except:
-            continue
+        if status == "approved":
+            try:
+                start = datetime.fromisoformat(inv.get("start_date", datetime.utcnow().isoformat()))
+                expiry = datetime.fromisoformat(inv.get("expiry_date", datetime.utcnow().isoformat()))
+                last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
+            except:
+                start = datetime.utcnow()
+                expiry = start + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
+                last = start
 
-        days_total = COMMODITY_INFO[commodity]["expiry_days"]
-        daily_rate = inv["amount"] / days_total
-        days_to_credit = max((now - last).days, 0)
+            days_total = COMMODITY_INFO[commodity]["expiry_days"]
+            daily_rate = amount / days_total
+            days_to_credit = max((now - last).days, 0)
 
-        if days_to_credit > 0:
-            earned = daily_rate * days_to_credit
-            user.balance += earned
-            user.earnings += earned
-            inv["last_credited"] = now.isoformat()
+            if days_to_credit > 0:
+                earned = daily_rate * days_to_credit
+                user.balance += earned
+                user.earnings += earned
+                inv["last_credited"] = now.isoformat()
 
-        inv_status[commodity] = {
-            "amount": inv["amount"],
-            "days_remaining": max((expiry - now).days, 0),
-            "daily_earning": daily_rate
-        }
-        daily_earnings += daily_rate
+            # Live countdown to next daily earning
+            seconds_since_last = (now - last).total_seconds()
+            seconds_to_next = 86400 - (seconds_since_last % 86400)
+            hours_to_next = int(seconds_to_next // 3600)
+            minutes_to_next = int((seconds_to_next % 3600) // 60)
+
+            inv_status[commodity] = {
+                "amount": amount,
+                "status": "approved",
+                "emoji": "✅",   # Large distinct approved emoji
+                "days_remaining": max((expiry - now).days, 0),
+                "daily_earning": daily_rate,
+                "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next earning"
+            }
+            daily_earnings += daily_rate
+        elif status == "pending":
+            inv_status[commodity] = {
+                "amount": amount,
+                "status": "pending",
+                "emoji": "🕒",   # Large distinct pending emoji (clock)
+                "payment_instruction": inv.get("payment_method", f"Pay via M-Pesa to {MPESA_NUMBER}")
+            }
+        else:
+            inv_status[commodity] = {
+                "amount": amount,
+                "status": "not_invested",
+                "emoji": "🔄",   # Large distinct not invested emoji
+                "payment_instruction": f"Pay via M-Pesa to {MPESA_NUMBER}"
+            }
+
+    referral_bonus = user.referral_bonus_earned
 
     db.add(user)
     db.commit()
@@ -335,7 +395,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
         "daily_earnings": daily_earnings,
         "approved": user.approved,
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={user.username}",
-        "referral_bonus_earned": user.referral_bonus_earned
+        "referral_bonus_earned": referral_bonus
     }
 
 # ---------------- RUN ----------------
