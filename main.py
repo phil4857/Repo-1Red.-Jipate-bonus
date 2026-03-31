@@ -169,12 +169,7 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
 
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
-
-# ---------------- ADMIN ROUTES (Fixed for your dashboard) ----------------
-# ---------------- ADMIN ROUTES (Updated with Withdrawals Approval) ----------------
-# ---------------- ADMIN ROUTES (Fixed for Approve, Reset, Terminate + Withdrawals) ----------------
-# ---------------- ADMIN ROUTES (Fixed for your dashboard) ----------------
-# ---------------- ADMIN ROUTES (Cleaned & Fixed) ----------------
+# ---------------- CLEAN ADMIN ROUTES (Replace everything old with this) ----------------
 
 class AdminAction(BaseModel):
     password: str
@@ -185,22 +180,15 @@ class AdminAction(BaseModel):
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    
     token = create_token({"sub": "admin", "role": "admin"})
-    return {
-        "success": True,
-        "message": "Admin login successful",
-        "access_token": token,
-        "token_type": "bearer"
-    }
+    return {"success": True, "message": "Admin login successful", "access_token": token, "token_type": "bearer"}
 
 @app.post("/admin/users")
 def get_admin_users(data: dict = Body(...), db: Session = Depends(get_db)):
     if data.get("password") != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
     users = db.query(UserDB).all()
-    user_list = [{
+    return [{
         "id": u.id,
         "username": u.username,
         "phone": u.phone,
@@ -208,7 +196,6 @@ def get_admin_users(data: dict = Body(...), db: Session = Depends(get_db)):
         "balance": u.balance,
         "earnings": u.earnings,
     } for u in users]
-    return user_list
 
 @app.post("/admin/approve-user")
 def approve_user(data: AdminAction = Body(...), db: Session = Depends(get_db)):
@@ -220,9 +207,6 @@ def approve_user(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     user = db.query(UserDB).filter_by(username=data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-    
-    if user.approved:
-        return {"message": f"User {data.username} is already approved"}
     
     user.approved = True
     db.commit()
@@ -256,14 +240,12 @@ def terminate_user(data: AdminAction = Body(...), db: Session = Depends(get_db))
     
     db.delete(user)
     db.commit()
-    return {"message": f"User {data.username} has been terminated and deleted"}
+    return {"message": f"User {data.username} has been terminated"}
 
-# Withdrawals
 @app.post("/admin/withdrawals")
 def get_withdrawals(data: dict = Body(...), db: Session = Depends(get_db)):
     if data.get("password") != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-    
     withdrawals = db.query(WithdrawalRequest).all()
     result = []
     for w in withdrawals:
@@ -287,14 +269,12 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     withdrawal = db.query(WithdrawalRequest).filter_by(id=data.withdrawal_id).first()
     if not withdrawal:
         raise HTTPException(status_code=404, detail="Withdrawal request not found")
-    
     if withdrawal.status != "pending":
         raise HTTPException(status_code=400, detail="Withdrawal already processed")
     
     withdrawal.status = "approved"
     withdrawal.approved_at = datetime.utcnow()
     
-    # Deduct from user balance
     user = db.query(UserDB).filter_by(id=withdrawal.user_id).first()
     if user and user.balance >= withdrawal.amount:
         user.balance -= withdrawal.amount
@@ -303,6 +283,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
+
 # ---------------- DASHBOARD & INVEST (your existing code continued) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
