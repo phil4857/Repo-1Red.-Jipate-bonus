@@ -173,6 +173,7 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
 # ---------------- ADMIN ROUTES (Fixed for your dashboard) ----------------
 # ---------------- ADMIN ROUTES (Updated with Withdrawals Approval) ----------------
 # ---------------- ADMIN ROUTES (Fixed for Approve, Reset, Terminate + Withdrawals) ----------------
+# ---------------- ADMIN ROUTES (Fixed for your dashboard) ----------------
 
 class AdminAction(BaseModel):
     password: str
@@ -295,33 +296,12 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     withdrawal.status = "approved"
     withdrawal.approved_at = datetime.utcnow()
     
-    # Optional: deduct from user balance
     user = db.query(UserDB).filter_by(id=withdrawal.user_id).first()
     if user:
         user.balance -= withdrawal.amount
     
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
-# ==================== NEW: WITHDRAWAL ADMIN ROUTES ====================
-
-# List pending withdrawals
-@app.post("/admin/withdrawals")
-def get_withdrawals(data: dict = Body(...), db: Session = Depends(get_db)):
-    if data.get("password") != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-    
-    withdrawals = db.query(WithdrawalRequest).all()
-    result = []
-    for w in withdrawals:
-        user = db.query(UserDB).filter_by(id=w.user_id).first()
-        result.append({
-            "id": w.id,
-            "username": user.username if user else "Unknown",
-            "amount": w.amount,
-            "status": w.status,
-            "requested_at": w.requested_at.isoformat() if w.requested_at else None
-        })
-    return result
 
 # Approve a withdrawal
 @app.post("/admin/withdraw_approve")
