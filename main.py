@@ -128,9 +128,7 @@ class InvestRequest(BaseModel):
 class WithdrawRequestSchema(BaseModel):
     amount: float
 
-# ---------------- CLEAN ADMIN ROUTES (Fixed - only this part changed) ----------------
-# Removed duplicate AdminAction class and aligned perfectly with your frontend JS
-
+# ---------------- CLEAN ADMIN ROUTES (ONLY THIS PART CHANGED) ----------------
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
@@ -163,11 +161,9 @@ def approve_user(data: AdminAction = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Invalid admin password")
     if not data.username:
         raise HTTPException(status_code=400, detail="username is required")
-    
     user = db.query(UserDB).filter_by(username=data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-    
     user.approved = True
     db.commit()
     return {"message": f"User {data.username} approved successfully"}
@@ -178,11 +174,9 @@ def reset_password(data: AdminAction = Body(...), db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Invalid admin password")
     if not data.username:
         raise HTTPException(status_code=400, detail="username is required")
-    
     user = db.query(UserDB).filter_by(username=data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-    
     user.password_hash = hash_pwd("123456")
     db.commit()
     return {"message": f"Password for {data.username} reset to '123456'"}
@@ -193,11 +187,9 @@ def terminate_user(data: AdminAction = Body(...), db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="Invalid admin password")
     if not data.username:
         raise HTTPException(status_code=400, detail="username is required")
-    
     user = db.query(UserDB).filter_by(username=data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-    
     db.delete(user)
     db.commit()
     return {"message": f"User {data.username} has been terminated"}
@@ -225,33 +217,27 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
         raise HTTPException(status_code=401, detail="Invalid admin password")
     if not data.withdrawal_id:
         raise HTTPException(status_code=400, detail="withdrawal_id is required")
-    
     withdrawal = db.query(WithdrawalRequest).filter_by(id=data.withdrawal_id).first()
     if not withdrawal:
         raise HTTPException(status_code=404, detail="Withdrawal request not found")
     if withdrawal.status != "pending":
         raise HTTPException(status_code=400, detail="Withdrawal already processed")
-    
     withdrawal.status = "approved"
     withdrawal.approved_at = datetime.utcnow()
-    
     user = db.query(UserDB).filter_by(id=withdrawal.user_id).first()
     if user and user.balance >= withdrawal.amount:
         user.balance -= withdrawal.amount
     else:
         raise HTTPException(status_code=400, detail="Insufficient balance or user not found")
-    
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- AUTH ROUTES ----------------
+# ---------------- AUTH ROUTES ---------------- (UNTOUCHED)
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     print(f"[REGISTER] Received data: {data.dict()}")
-
     if db.query(UserDB).filter_by(username=data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
-
     user = UserDB(
         username=data.username,
         phone=data.phone,
@@ -261,7 +247,6 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
-
     return {
         "message": "Registered successfully. Await admin approval.",
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
@@ -270,27 +255,23 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
 @app.post("/login")
 def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     print(f"[LOGIN] Received data: {data.dict()}")
-
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
     if not user or not check_pwd(data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid username or password")
-
     if not user.approved:
         raise HTTPException(status_code=403, detail="Account not yet approved by admin")
-
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD & INVEST (your existing code continued) ----------------
+# ---------------- DASHBOARD & INVEST (UNTOUCHED) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    # ... (your original dashboard code remains exactly the same)
     user = current_user
     now = datetime.utcnow()
     daily_earnings = 0
     inv_status = {}
-
     investments = user.investments or {}
-
     for commodity, inv in investments.items():
         try:
             start = datetime.fromisoformat(inv["start_date"])
@@ -298,28 +279,23 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
         except:
             continue
-
         days_total = COMMODITY_INFO[commodity]["expiry_days"]
         daily_rate = inv["amount"] / days_total
         days_to_credit = max((now - last).days, 0)
-
         if days_to_credit > 0:
             earned = daily_rate * days_to_credit
             user.balance += earned
             user.earnings += earned
             inv["last_credited"] = now.isoformat()
-
         inv_status[commodity] = {
             "amount": inv["amount"],
             "days_remaining": max((expiry - now).days, 0),
             "daily_earning": daily_rate
         }
         daily_earnings += daily_rate
-
     db.add(user)
     db.commit()
     db.refresh(user)
-
     return {
         "username": user.username,
         "balance": user.balance,
@@ -336,9 +312,9 @@ def invest_request(data: InvestRequest):
     if data.commodity not in COMMODITY_INFO:
         raise HTTPException(status_code=400, detail="Invalid commodity")
     price = COMMODITY_INFO[data.commodity]["price"]
-    return {"message": "Send payment manually", "price": price}  # You can expand this later
+    return {"message": "Send payment manually", "price": price}
 
-# ---------------- RUN (for local testing) ----------------
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
