@@ -17,7 +17,6 @@ SECRET_KEY = "CHANGE_THIS_SECRET_TO_A_STRONG_RANDOM_VALUE_IN_PRODUCTION"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
-REFERRAL_BONUS_PERCENT = 10
 
 COMMODITY_INFO = {
     "marble": {"price": 650, "expiry_days": 15},
@@ -53,7 +52,7 @@ class UserDB(Base):
     username = Column(String, unique=True, index=True)
     phone = Column(String)
     password_hash = Column(String)
-    approved = Column(Boolean, default=True)          # ← CHANGED: default True
+    approved = Column(Boolean, default=True)   # Auto-approved on register
     balance = Column(Float, default=0.0)
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
@@ -125,12 +124,13 @@ class UserLogin(BaseModel):
 class InvestRequest(BaseModel):
     commodity: str
 
-# ---------------- CLEAN ADMIN ROUTES (unchanged) ----------------
+# ---------------- ADMIN ACTION SCHEMA ----------------
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
     withdrawal_id: Optional[int] = None
 
+# ---------------- CLEAN ADMIN ROUTES ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -232,8 +232,6 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
 # ---------------- AUTH ROUTES (UPDATED) ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
-    print(f"[REGISTER] Received data: {data.dict()}")
-
     if db.query(UserDB).filter_by(username=data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
 
@@ -242,31 +240,27 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
         phone=data.phone,
         password_hash=hash_pwd(data.password),
         referral_code=data.referral.lower() if data.referral else None,
-        approved=True   # ← AUTO APPROVED
+        approved=True   # Direct access
     )
     db.add(user)
     db.commit()
     db.refresh(user)
 
     return {
-        "message": "Registered successfully. You can login now.",
+        "message": "Registered successfully. You can login immediately.",
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
     }
 
 @app.post("/login")
 def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
-    print(f"[LOGIN] Received data: {data.dict()}")
-
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
     if not user or not check_pwd(data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid username or password")
 
-    # ← REMOVED approval check → user logs in immediately
-
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- INVESTMENT (NOW PENDING) ----------------
+# ---------------- INVEST REQUEST (PENDING) ----------------
 @app.post("/invest/request")
 def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.commodity not in COMMODITY_INFO:
@@ -274,29 +268,26 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
 
     price = COMMODITY_INFO[data.commodity]["price"]
 
-    # Create pending investment
     investments = current_user.investments or {}
     investments[data.commodity] = {
         "amount": price,
-        "status": "pending",                    # ← PENDING
+        "status": "pending",                    # Pending until admin approves
         "requested_at": datetime.utcnow().isoformat()
     }
     current_user.investments = investments
-
     db.commit()
     db.refresh(current_user)
 
     return {
-        "message": "Investment request submitted. Payment is pending admin approval.",
+        "message": f"Request for {data.commodity} submitted. Pending admin approval.",
         "commodity": data.commodity,
         "price": price,
         "status": "pending"
     }
 
-# ---------------- DASHBOARD (UNTOUCHED) ----------------
+# ---------------- DASHBOARD (original, untouched) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    # ... your original dashboard code (unchanged)
     user = current_user
     now = datetime.utcnow()
     daily_earnings = 0
@@ -306,7 +297,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
 
     for commodity, inv in investments.items():
         if inv.get("status") != "approved":
-            continue  # skip pending investments
+            continue  # skip pending
 
         try:
             start = datetime.fromisoformat(inv["start_date"])
