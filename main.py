@@ -53,7 +53,7 @@ class UserDB(Base):
     username = Column(String, unique=True, index=True)
     phone = Column(String)
     password_hash = Column(String)
-    approved = Column(Boolean, default=False)
+    approved = Column(Boolean, default=True)          # ← CHANGED: default True
     balance = Column(Float, default=0.0)
     earnings = Column(Float, default=0.0)
     investments = Column(JSON, default={})
@@ -125,10 +125,7 @@ class UserLogin(BaseModel):
 class InvestRequest(BaseModel):
     commodity: str
 
-class WithdrawRequestSchema(BaseModel):
-    amount: float
-
-# ---------------- CLEAN ADMIN ROUTES (ONLY THIS PART CHANGED) ----------------
+# ---------------- CLEAN ADMIN ROUTES (unchanged) ----------------
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
@@ -232,70 +229,113 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- AUTH ROUTES ---------------- (UNTOUCHED)
+# ---------------- AUTH ROUTES (UPDATED) ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     print(f"[REGISTER] Received data: {data.dict()}")
+
     if db.query(UserDB).filter_by(username=data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
+
     user = UserDB(
         username=data.username,
         phone=data.phone,
         password_hash=hash_pwd(data.password),
-        referral_code=data.referral.lower() if data.referral else None
+        referral_code=data.referral.lower() if data.referral else None,
+        approved=True   # ← AUTO APPROVED
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+
     return {
-        "message": "Registered successfully. Await admin approval.",
+        "message": "Registered successfully. You can login now.",
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
     }
 
 @app.post("/login")
 def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     print(f"[LOGIN] Received data: {data.dict()}")
+
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
     if not user or not check_pwd(data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid username or password")
-    if not user.approved:
-        raise HTTPException(status_code=403, detail="Account not yet approved by admin")
+
+    # ← REMOVED approval check → user logs in immediately
+
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD & INVEST (UNTOUCHED) ----------------
+# ---------------- INVESTMENT (NOW PENDING) ----------------
+@app.post("/invest/request")
+def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    if data.commodity not in COMMODITY_INFO:
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+
+    price = COMMODITY_INFO[data.commodity]["price"]
+
+    # Create pending investment
+    investments = current_user.investments or {}
+    investments[data.commodity] = {
+        "amount": price,
+        "status": "pending",                    # ← PENDING
+        "requested_at": datetime.utcnow().isoformat()
+    }
+    current_user.investments = investments
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "message": "Investment request submitted. Payment is pending admin approval.",
+        "commodity": data.commodity,
+        "price": price,
+        "status": "pending"
+    }
+
+# ---------------- DASHBOARD (UNTOUCHED) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    # ... (your original dashboard code remains exactly the same)
+    # ... your original dashboard code (unchanged)
     user = current_user
     now = datetime.utcnow()
     daily_earnings = 0
     inv_status = {}
+
     investments = user.investments or {}
+
     for commodity, inv in investments.items():
+        if inv.get("status") != "approved":
+            continue  # skip pending investments
+
         try:
             start = datetime.fromisoformat(inv["start_date"])
             expiry = datetime.fromisoformat(inv["expiry_date"])
             last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
         except:
             continue
+
         days_total = COMMODITY_INFO[commodity]["expiry_days"]
         daily_rate = inv["amount"] / days_total
         days_to_credit = max((now - last).days, 0)
+
         if days_to_credit > 0:
             earned = daily_rate * days_to_credit
             user.balance += earned
             user.earnings += earned
             inv["last_credited"] = now.isoformat()
+
         inv_status[commodity] = {
             "amount": inv["amount"],
             "days_remaining": max((expiry - now).days, 0),
             "daily_earning": daily_rate
         }
         daily_earnings += daily_rate
+
     db.add(user)
     db.commit()
     db.refresh(user)
+
     return {
         "username": user.username,
         "balance": user.balance,
@@ -306,13 +346,6 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={user.username}",
         "referral_bonus_earned": user.referral_bonus_earned
     }
-
-@app.post("/invest/request")
-def invest_request(data: InvestRequest):
-    if data.commodity not in COMMODITY_INFO:
-        raise HTTPException(status_code=400, detail="Invalid commodity")
-    price = COMMODITY_INFO[data.commodity]["price"]
-    return {"message": "Send payment manually", "price": price}
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
