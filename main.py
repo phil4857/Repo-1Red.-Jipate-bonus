@@ -240,13 +240,12 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
-    # Approve the investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
     
-    # Referral bonus (only when referred user invests)
+    # Referral bonus when referred user invests
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -258,7 +257,6 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     db.refresh(user)
     return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."}
-
 
 # ---------------- LIST PENDING INVESTMENTS FOR ADMIN ----------------
 @app.post("/admin/pending-investments")
@@ -281,6 +279,37 @@ def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db
                 })
     
     return pending
+
+# ---------------- AUTH ROUTES ----------------
+@app.post("/register")
+def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
+    if db.query(UserDB).filter_by(username=data.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+
+    user = UserDB(
+        username=data.username,
+        phone=data.phone,
+        password_hash=hash_pwd(data.password),
+        referral_code=data.referral.lower() if data.referral else None,
+        approved=True
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "message": "Registered successfully. You can login immediately.",
+        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
+    }
+
+@app.post("/login")
+def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
+    user = db.query(UserDB).filter_by(username=data.username.lower()).first()
+    if not user or not check_pwd(data.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+
+    token = create_token({"sub": user.username})
+    return {"access_token": token, "token_type": "bearer"}
 
 # ---------------- INVEST REQUEST (WITH MPESA) ----------------
 @app.post("/invest/request")
@@ -309,7 +338,7 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
         "status": "pending"
     }
 
-# ---------------- DASHBOARD (ALL COMMODITIES + EXPIRY + DAILY EARNING + LIVE COUNTDOWN + LARGE DISTINCT EMOJIS) ----------------
+# ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
@@ -344,7 +373,6 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 user.earnings += earned
                 inv["last_credited"] = now.isoformat()
 
-            # Live countdown to next daily earning
             seconds_since_last = (now - last).total_seconds()
             seconds_to_next = 86400 - (seconds_since_last % 86400)
             hours_to_next = int(seconds_to_next // 3600)
@@ -353,7 +381,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "approved",
-                "emoji": "✅",   # Large distinct approved emoji
+                "emoji": "✅",
                 "days_remaining": max((expiry - now).days, 0),
                 "daily_earning": daily_rate,
                 "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next earning"
@@ -363,14 +391,14 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "pending",
-                "emoji": "🕒",   # Large distinct pending emoji (clock)
+                "emoji": "🕒",
                 "payment_instruction": inv.get("payment_method", f"Pay via M-Pesa to {MPESA_NUMBER}")
             }
         else:
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "not_invested",
-                "emoji": "🔄",   # Large distinct not invested emoji
+                "emoji": "🔄",
                 "payment_instruction": f"Pay via M-Pesa to {MPESA_NUMBER}"
             }
 
