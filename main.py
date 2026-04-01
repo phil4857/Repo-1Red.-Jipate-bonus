@@ -131,14 +131,13 @@ class InvestRequest(BaseModel):
 class WithdrawRequest(BaseModel):
     amount: float
 
-# ---------------- ADMIN ACTION SCHEMA ----------------
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
     withdrawal_id: Optional[int] = None
     investment_commodity: Optional[str] = None
 
-# ---------------- ADMIN ROUTES ----------------
+# ---------------- ADMIN ROUTES (unchanged) ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -224,7 +223,6 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -249,13 +247,13 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
 
-    investments[data.investment_commodity] = investment
-    user.investments = investments
+    user.investments = investments   # Important for MutableDict
     
+    # Referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            bonus = investment["amount"] * (REFERRAL_BONUS_PERCENT / 100)
+            bonus = investment.get("amount", 0) * (REFERRAL_BONUS_PERCENT / 100)
             referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0) + bonus
             referrer.balance = (referrer.balance or 0) + bonus
             db.add(referrer)
@@ -264,7 +262,6 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     db.refresh(user)
     return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."}
 
-# ---------------- LIST PENDING INVESTMENTS ----------------
 @app.post("/admin/pending-investments")
 def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db)):
     if data.get("password") != ADMIN_PASSWORD:
@@ -286,13 +283,45 @@ def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db
     
     return pending
 
+# ==================== FIXED INVESTMENT REQUEST ====================
+@app.post("/invest/request")
+def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    if data.commodity not in COMMODITY_INFO:
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+
+    price = COMMODITY_INFO[data.commodity]["price"]
+
+    investments = current_user.investments or {}
+
+    # Prevent duplicate pending investment for same commodity
+    if data.commodity in investments and investments[data.commodity].get("status") == "pending":
+        raise HTTPException(status_code=400, detail="You already have a pending request for this commodity")
+
+    investments[data.commodity] = {
+        "amount": price,
+        "status": "pending",
+        "payment_method": f"Pay via M-Pesa to {MPESA_NUMBER}",
+        "requested_at": datetime.utcnow().isoformat()
+    }
+
+    current_user.investments = investments
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "success": True,
+        "message": f"Request for {data.commodity} submitted successfully.",
+        "commodity": data.commodity,
+        "price": price,
+        "payment_instruction": f"Pay KES {price} via M-Pesa to {MPESA_NUMBER}",
+        "status": "pending"
+    }
+
 # ---------------- WITHDRAW REQUEST ----------------
 @app.post("/withdraw/request")
 def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-    
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
-
     if current_user.balance < data.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
@@ -300,13 +329,12 @@ def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get
         user_id=current_user.id,
         amount=data.amount
     )
-
     db.add(withdrawal)
     db.commit()
 
     return {"message": "Withdrawal request submitted. Waiting for admin approval."}
 
-# ---------------- AUTH ROUTES ----------------
+# ---------------- AUTH ROUTES (unchanged) ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     if db.query(UserDB).filter_by(username=data.username).first():
@@ -337,9 +365,10 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD ----------------
+# ---------------- DASHBOARD (unchanged) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    # ... (your existing dashboard code remains the same)
     user = current_user
     now = datetime.utcnow()
     daily_earnings = 0
