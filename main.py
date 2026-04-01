@@ -223,6 +223,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
+# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -242,13 +243,15 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
+    # === FIXED: Force mutation detection ===
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
 
-    user.investments = investments   # Important for MutableDict
-    
+    # Re-assign the whole dict to trigger SQLAlchemy change tracking
+    user.investments = dict(investments)   # Important fix
+
     # Referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
@@ -260,7 +263,10 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     
     db.commit()
     db.refresh(user)
-    return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."}
+    
+    return {
+        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."
+    }
 
 @app.post("/admin/pending-investments")
 def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db)):
