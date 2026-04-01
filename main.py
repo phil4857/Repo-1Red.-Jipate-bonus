@@ -234,60 +234,53 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     
     investments = user.investments or {}
     if data.investment_commodity not in investments:
-        raise HTTPException(status_code=404, detail="Investment not found")
+        raise HTTPException(status_code=404, detail="Investment not found for this user")
     
     investment = investments[data.investment_commodity]
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
+    # Approve the investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
     
-    # Referral bonus when referred user invests
+    # Referral bonus (only when referred user invests)
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
             bonus = investment["amount"] * (REFERRAL_BONUS_PERCENT / 100)
-            referrer.referral_bonus_earned += bonus
-            referrer.balance += bonus
+            referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0) + bonus
+            referrer.balance = (referrer.balance or 0) + bonus
             db.add(referrer)
     
     db.commit()
     db.refresh(user)
-    return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully"}
+    return {"message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."}
 
-# ---------------- AUTH ROUTES ----------------
-@app.post("/register")
-def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
-    if db.query(UserDB).filter_by(username=data.username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
 
-    user = UserDB(
-        username=data.username,
-        phone=data.phone,
-        password_hash=hash_pwd(data.password),
-        referral_code=data.referral.lower() if data.referral else None,
-        approved=True
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-
-    return {
-        "message": "Registered successfully. You can login immediately.",
-        "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={data.username}"
-    }
-
-@app.post("/login")
-def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
-    user = db.query(UserDB).filter_by(username=data.username.lower()).first()
-    if not user or not check_pwd(data.password, user.password_hash):
-        raise HTTPException(status_code=400, detail="Invalid username or password")
-
-    token = create_token({"sub": user.username})
-    return {"access_token": token, "token_type": "bearer"}
+# ---------------- LIST PENDING INVESTMENTS FOR ADMIN ----------------
+@app.post("/admin/pending-investments")
+def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db)):
+    if data.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    users = db.query(UserDB).all()
+    pending = []
+    
+    for user in users:
+        investments = user.investments or {}
+        for commodity, inv in investments.items():
+            if inv.get("status") == "pending":
+                pending.append({
+                    "username": user.username,
+                    "commodity": commodity,
+                    "amount": inv.get("amount", 0),
+                    "requested_at": inv.get("requested_at", "N/A")
+                })
+    
+    return pending
 
 # ---------------- INVEST REQUEST (WITH MPESA) ----------------
 @app.post("/invest/request")
