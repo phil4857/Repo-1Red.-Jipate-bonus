@@ -127,7 +127,7 @@ class UserLogin(BaseModel):
 class InvestRequest(BaseModel):
     commodity: str
 
-# ---------------- ADMIN ACTION SCHEMA ----------------
+# ---------------- ADMIN ACTION SCHEMA (Single clean version) ----------------
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
