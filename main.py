@@ -141,7 +141,7 @@ class AdminAction(BaseModel):
     withdrawal_id: Optional[int] = None
     investment_commodity: Optional[str] = None
 
-# ---------------- ADMIN ROUTES ----------------
+# ---------------- ADMIN ROUTES (unchanged except approve-investment) ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -227,7 +227,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN (Immediate Grab Enabled) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Fixed Referral + Immediate Grab) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -247,28 +247,30 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
-    # Approve and allow immediate first grab
+    amount = investment.get("amount", 0)
+    
+    # Approve investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
-    investment["last_credited"] = (datetime.utcnow() - timedelta(days=1)).isoformat()  # Allow immediate grab
+    investment["last_credited"] = (datetime.utcnow() - timedelta(days=1)).isoformat()  # Allow immediate first grab
 
     flag_modified(user, "investments")
 
-    # Referral bonus
+    # === Referral Bonus: 10% of investment amount ===
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            bonus = investment.get("amount", 0) * (REFERRAL_BONUS_PERCENT / 100)
+            bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
             referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0) + bonus
             referrer.balance = (referrer.balance or 0) + bonus
             db.add(referrer)
-    
+
     db.commit()
     db.refresh(user)
     
     return {
-        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. User can grab the first daily bonus immediately."
+        "message": f"Investment in {data.investment_commodity} for {data.username} approved. First daily bonus ready to grab. Referral bonus added if applicable."
     }
 
 @app.post("/admin/pending-investments")
@@ -343,7 +345,7 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
     try:
         last_credited = datetime.fromisoformat(inv.get("last_credited"))
     except:
-        last_credited = now - timedelta(days=2)  # Allow first grab
+        last_credited = now - timedelta(days=2)
 
     if (now - last_credited).total_seconds() < 86400:
         seconds_left = 86400 - (now - last_credited).total_seconds()
@@ -419,7 +421,7 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD (Shows Grab Button Immediately After Approval) ----------------
+# ---------------- DASHBOARD ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
@@ -436,12 +438,10 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
 
         if status == "approved":
             try:
-                start = datetime.fromisoformat(inv.get("start_date", now.isoformat()))
                 expiry = datetime.fromisoformat(inv.get("expiry_date", now.isoformat()))
                 last = datetime.fromisoformat(inv.get("last_credited", (now - timedelta(days=2)).isoformat()))
             except Exception:
-                start = now
-                expiry = start + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
+                expiry = now + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
                 last = now - timedelta(days=2)
 
             days_total = COMMODITY_INFO[commodity]["expiry_days"]
