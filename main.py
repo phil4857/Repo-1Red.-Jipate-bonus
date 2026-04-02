@@ -20,6 +20,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
 REFERRAL_BONUS_PERCENT = 10
+WITHDRAWAL_CHARGE_PERCENT = 20   # 20% charge on every withdrawal
 
 # Daily bonus = 10% of investment price
 COMMODITY_INFO = {
@@ -69,7 +70,10 @@ class WithdrawalRequest(Base):
     __tablename__ = "withdrawals"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
-    amount = Column(Float)
+    amount = Column(Float)           # Amount requested by user
+    charge = Column(Float, default=0.0)
+    net_amount = Column(Float, default=0.0)
+    payment_method = Column(String, default="mpesa")
     status = Column(String, default="pending")
     requested_at = Column(DateTime, default=datetime.utcnow)
     approved_at = Column(DateTime, nullable=True)
@@ -135,6 +139,7 @@ class GrabBonusRequest(BaseModel):
 
 class WithdrawRequest(BaseModel):
     amount: float
+    payment_method: str = "mpesa"   # mpesa, bank, paypal
 
 class AdminAction(BaseModel):
     password: str
@@ -202,6 +207,9 @@ def get_withdrawals(data: dict = Body(...), db: Session = Depends(get_db)):
             "id": w.id,
             "username": user.username if user else "Unknown",
             "amount": w.amount,
+            "charge": w.charge,
+            "net_amount": w.net_amount,
+            "payment_method": w.payment_method,
             "status": w.status,
             "requested_at": w.requested_at.isoformat() if w.requested_at else None
         })
@@ -257,7 +265,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
 
     flag_modified(user, "investments")
 
-    # Referral Bonus = 10% of investment
+    # Referral Bonus = 10%
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -370,22 +378,38 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
         "new_balance": round(current_user.balance, 2)
     }
 
-# ---------------- WITHDRAW REQUEST ----------------
+# ---------------- WITHDRAW REQUEST (with 20% charge + multiple methods) ----------------
 @app.post("/withdraw/request")
 def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
+    
+    charge = data.amount * (WITHDRAWAL_CHARGE_PERCENT / 100)
+    net_amount = data.amount - charge
+
     if current_user.balance < data.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
+    # Validate payment method
+    valid_methods = ["mpesa", "bank", "paypal"]
+    if data.payment_method.lower() not in valid_methods:
+        raise HTTPException(status_code=400, detail="Invalid payment method. Choose: mpesa, bank, or paypal")
+
     withdrawal = WithdrawalRequest(
         user_id=current_user.id,
-        amount=data.amount
+        amount=data.amount,
+        charge=charge,
+        net_amount=net_amount,
+        payment_method=data.payment_method.lower()
     )
     db.add(withdrawal)
     db.commit()
 
-    return {"message": "Withdrawal request submitted. Waiting for admin approval."}
+    return {
+        "message": f"Withdrawal request of KES {data.amount} submitted. "
+                   f"Charge: KES {charge:.2f} (20%). You will receive KES {net_amount:.2f} "
+                   f"via {data.payment_method.upper()} after admin approval."
+    }
 
 # ---------------- AUTH ROUTES ----------------
 @app.post("/register")
