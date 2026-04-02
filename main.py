@@ -20,7 +20,7 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
 REFERRAL_BONUS_PERCENT = 10
-WITHDRAWAL_CHARGE_PERCENT = 20   # 20% charge on every withdrawal
+WITHDRAWAL_CHARGE_PERCENT = 20
 
 # Daily bonus = 10% of investment price
 COMMODITY_INFO = {
@@ -236,7 +236,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN (Strict Referral Rules) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Fixed Referral Bonus) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -271,7 +271,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            # Rule: Referrer must have at least one approved investment
+            # Check if referrer has at least one approved investment
             referrer_investments = referrer.investments or {}
             has_approved_investment = any(
                 inv.get("status") == "approved" 
@@ -282,8 +282,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
                 referral_bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
                 referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0.0) + referral_bonus
                 referrer.balance = (referrer.balance or 0.0) + referral_bonus
-                db.add(referrer)
-            # Else: No bonus - referrer has not invested/approved yet
+                db.add(referrer)   # Ensure referrer is tracked
 
     db.commit()
     db.refresh(user)
