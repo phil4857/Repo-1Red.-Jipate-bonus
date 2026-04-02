@@ -233,84 +233,49 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
 
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid admin password")
-
     if not data.username or not data.investment_commodity:
         raise HTTPException(status_code=400, detail="username and investment_commodity are required")
-
+    
     user = db.query(UserDB).filter_by(username=data.username).first()
-
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
-
-    investments = dict(user.investments or {})
-
+    
+    investments = user.investments or {}
     if data.investment_commodity not in investments:
         raise HTTPException(status_code=404, detail="Investment not found for this user")
-
+    
     investment = investments[data.investment_commodity]
-
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
-
+    
+    # ✅ Update investment status
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
-    investment["expiry_date"] = (
-        datetime.utcnow() +
-        timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])
-    ).isoformat()
+    investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
 
-    investments[data.investment_commodity] = investment
+    # ✅ Re-assign the investments dict to trigger SQLAlchemy change detection
+    user.investments = dict(investments)
 
-    user.investments = investments
-
-    db.add(user)
-
+    # ✅ Handle referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
-
         if referrer:
             bonus = investment.get("amount", 0) * (REFERRAL_BONUS_PERCENT / 100)
-
             referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0) + bonus
             referrer.balance = (referrer.balance or 0) + bonus
-
             db.add(referrer)
-
+    
     db.commit()
     db.refresh(user)
-
+    
     return {
         "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."
     }
-
-@app.post("/admin/pending-investments")
-def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db)):
-    if data.get("password") != ADMIN_PASSWORD:
-        raise HTTPException(status_code=401, detail="Invalid admin password")
-
-    users = db.query(UserDB).all()
-
-    pending = []
-
-    for user in users:
-        investments = user.investments or {}
-
-        for commodity, inv in investments.items():
-            if inv.get("status") == "pending":
-                pending.append({
-                    "username": user.username,
-                    "commodity": commodity,
-                    "amount": inv.get("amount", 0),
-                    "requested_at": inv.get("requested_at", "N/A")
-                })
-
-    return pending
 
 # ==================== INVESTMENT REQUEST ====================
 @app.post("/invest/request")
