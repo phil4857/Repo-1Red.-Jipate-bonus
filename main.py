@@ -129,11 +129,11 @@ class UserLogin(BaseModel):
 class InvestRequest(BaseModel):
     commodity: str
 
-class WithdrawRequest(BaseModel):
-    amount: float
-
 class GrabBonusRequest(BaseModel):
     commodity: str
+
+class WithdrawRequest(BaseModel):
+    amount: float
 
 class AdminAction(BaseModel):
     password: str
@@ -141,7 +141,7 @@ class AdminAction(BaseModel):
     withdrawal_id: Optional[int] = None
     investment_commodity: Optional[str] = None
 
-# ---------------- ADMIN ROUTES (unchanged) ----------------
+# ---------------- ADMIN ROUTES ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -227,7 +227,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Immediate Grab Enabled) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -247,13 +247,15 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
+    # Approve and allow immediate first grab
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
-    investment["last_credited"] = datetime.utcnow().isoformat()   # Allow immediate grab
+    investment["last_credited"] = (datetime.utcnow() - timedelta(days=1)).isoformat()  # Allow immediate grab
 
     flag_modified(user, "investments")
 
+    # Referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -266,7 +268,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     db.refresh(user)
     
     return {
-        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. User can now grab daily bonus."
+        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. User can grab the first daily bonus immediately."
     }
 
 @app.post("/admin/pending-investments")
@@ -324,7 +326,7 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
         "status": "pending"
     }
 
-# ---------------- NEW: Grab Daily Bonus Route ----------------
+# ---------------- GRAB DAILY BONUS ----------------
 @app.post("/bonus/grab")
 def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     commodity = data.commodity
@@ -339,18 +341,16 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
 
     now = datetime.utcnow()
     try:
-        last_credited = datetime.fromisoformat(inv.get("last_credited", now.isoformat()))
+        last_credited = datetime.fromisoformat(inv.get("last_credited"))
     except:
-        last_credited = now - timedelta(days=1)  # Allow first grab
+        last_credited = now - timedelta(days=2)  # Allow first grab
 
-    # Check if 24 hours have passed since last grab
     if (now - last_credited).total_seconds() < 86400:
         seconds_left = 86400 - (now - last_credited).total_seconds()
         hours = int(seconds_left // 3600)
         minutes = int((seconds_left % 3600) // 60)
         raise HTTPException(status_code=400, detail=f"Next bonus available in {hours}h {minutes}m")
 
-    # Calculate and credit daily bonus
     days_total = COMMODITY_INFO[commodity]["expiry_days"]
     daily_rate = inv["amount"] / days_total
     earned = daily_rate
@@ -388,7 +388,7 @@ def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get
 
     return {"message": "Withdrawal request submitted. Waiting for admin approval."}
 
-# ---------------- AUTH ROUTES (unchanged) ----------------
+# ---------------- AUTH ROUTES ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     if db.query(UserDB).filter_by(username=data.username).first():
@@ -419,7 +419,7 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD (Shows Grab Button + Live Countdown) ----------------
+# ---------------- DASHBOARD (Shows Grab Button Immediately After Approval) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
@@ -438,16 +438,15 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             try:
                 start = datetime.fromisoformat(inv.get("start_date", now.isoformat()))
                 expiry = datetime.fromisoformat(inv.get("expiry_date", now.isoformat()))
-                last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
+                last = datetime.fromisoformat(inv.get("last_credited", (now - timedelta(days=2)).isoformat()))
             except Exception:
                 start = now
                 expiry = start + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
-                last = start - timedelta(days=1)  # Allow immediate first grab
+                last = now - timedelta(days=2)
 
             days_total = COMMODITY_INFO[commodity]["expiry_days"]
             daily_rate = amount / days_total
 
-            # Check if bonus is ready to grab
             can_grab = (now - last).total_seconds() >= 86400
 
             seconds_since_last = (now - last).total_seconds()
@@ -464,8 +463,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 "days_remaining": days_remaining,
                 "daily_earning": round(daily_rate, 2),
                 "can_grab": can_grab,
-                "time_to_next": f"{hours_to_next}h {minutes_to_next}m" if not can_grab else "Ready now!",
-                "action": "grab_bonus" if can_grab else "wait"
+                "time_to_next": f"{hours_to_next}h {minutes_to_next}m" if not can_grab else "Ready to grab now!"
             }
             daily_earnings_total += daily_rate
 
