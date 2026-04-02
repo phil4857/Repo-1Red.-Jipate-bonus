@@ -9,7 +9,7 @@ from pydantic import BaseModel, constr, validator
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.ext.mutable import MutableDict
-from sqlalchemy.orm.attributes import flag_modified   # <-- Added for JSON mutation fix
+from sqlalchemy.orm.attributes import flag_modified   # Added for reliable JSON updates
 import bcrypt
 import jwt
 
@@ -250,7 +250,6 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
 
-    # Critical fix for MutableDict/JSON
     flag_modified(user, "investments")
 
     # Referral bonus
@@ -312,7 +311,7 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
     }
 
     current_user.investments = investments
-    flag_modified(current_user, "investments")   # <-- Added for safety
+    flag_modified(current_user, "investments")
     db.commit()
     db.refresh(current_user)
 
@@ -373,12 +372,12 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD (with small safe fix) ----------------
+# ---------------- DASHBOARD (FIXED - Now shows daily earnings, countdown & days left) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
     now = datetime.utcnow()
-    daily_earnings = 0
+    daily_earnings = 0.0
     inv_status = {}
 
     investments = user.investments or {}
@@ -386,43 +385,51 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
     for commodity in COMMODITY_INFO:
         inv = investments.get(commodity, {})
         status = inv.get("status", "not_invested")
-        amount = inv.get("amount", 0)
+        amount = inv.get("amount", 0.0)
 
         if status == "approved":
             try:
-                start = datetime.fromisoformat(inv.get("start_date", datetime.utcnow().isoformat()))
-                expiry = datetime.fromisoformat(inv.get("expiry_date", datetime.utcnow().isoformat()))
+                start = datetime.fromisoformat(inv.get("start_date", now.isoformat()))
+                expiry = datetime.fromisoformat(inv.get("expiry_date", now.isoformat()))
                 last = datetime.fromisoformat(inv.get("last_credited", start.isoformat()))
-            except:
-                start = datetime.utcnow()
+            except Exception:
+                start = now
                 expiry = start + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
                 last = start
 
             days_total = COMMODITY_INFO[commodity]["expiry_days"]
             daily_rate = amount / days_total
-            days_to_credit = max((now - last).days, 0)
 
+            # Credit missed daily earnings
+            days_to_credit = max((now - last).days, 0)
             if days_to_credit > 0:
                 earned = daily_rate * days_to_credit
                 user.balance += earned
                 user.earnings += earned
                 inv["last_credited"] = now.isoformat()
-                flag_modified(user, "investments")   # <-- Safe fix for daily earnings
 
+            # Force save for JSON field
+            flag_modified(user, "investments")
+
+            # Live countdown to next earning
             seconds_since_last = (now - last).total_seconds()
             seconds_to_next = 86400 - (seconds_since_last % 86400)
             hours_to_next = int(seconds_to_next // 3600)
             minutes_to_next = int((seconds_to_next % 3600) // 60)
 
+            days_remaining = max((expiry - now).days, 0)
+
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "approved",
                 "emoji": "✅",
-                "days_remaining": max((expiry - now).days, 0),
-                "daily_earning": daily_rate,
-                "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next earning"
+                "days_remaining": days_remaining,
+                "daily_earning": round(daily_rate, 2),
+                "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next daily bonus",
+                "next_bonus_in": f"{hours_to_next}h {minutes_to_next}m"
             }
             daily_earnings += daily_rate
+
         elif status == "pending":
             inv_status[commodity] = {
                 "amount": amount,
@@ -432,27 +439,26 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             }
         else:
             inv_status[commodity] = {
-                "amount": amount,
+                "amount": 0,
                 "status": "not_invested",
                 "emoji": "🔄",
-                "payment_instruction": f"Pay via M-Pesa to {MPESA_NUMBER}"
+                "payment_instruction": f"Pay via M-Pesa to {MPESA_NUMBER} to invest in {commodity}"
             }
 
-    referral_bonus = user.referral_bonus_earned
+    referral_bonus = user.referral_bonus_earned or 0.0
 
-    db.add(user)
     db.commit()
     db.refresh(user)
 
     return {
         "username": user.username,
-        "balance": user.balance,
-        "earnings": user.earnings,
+        "balance": round(user.balance, 2),
+        "earnings": round(user.earnings, 2),
         "investments": inv_status,
-        "daily_earnings": daily_earnings,
+        "daily_earnings_total": round(daily_earnings, 2),
         "approved": user.approved,
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={user.username}",
-        "referral_bonus_earned": referral_bonus
+        "referral_bonus_earned": round(referral_bonus, 2)
     }
 
 # ---------------- RUN ----------------
