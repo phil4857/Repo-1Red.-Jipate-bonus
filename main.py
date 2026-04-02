@@ -22,7 +22,6 @@ ADMIN_PASSWORD = "PHIL4857"
 REFERRAL_BONUS_PERCENT = 10
 WITHDRAWAL_CHARGE_PERCENT = 20
 
-# Daily bonus = 10% of investment price
 COMMODITY_INFO = {
     "marble": {"price": 650, "daily_bonus": 65, "expiry_days": 15},
     "crude_oil": {"price": 800, "daily_bonus": 80, "expiry_days": 20},
@@ -236,7 +235,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN (Strict Referral Rules) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Fixed Referral) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -258,7 +257,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     
     amount = investment.get("amount", 0.0)
     
-    # Approve the investment
+    # Approve investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
@@ -266,22 +265,16 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
 
     flag_modified(user, "investments")
 
-    # === STRICT REFERRAL BONUS RULES ===
+    # Strict Referral Bonus
     referral_bonus = 0.0
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            # Refresh referrer to get latest investments
-            db.refresh(referrer)
+            db.refresh(referrer)  # Ensure latest data
             referrer_investments = referrer.investments or {}
+            has_approved = any(inv.get("status") == "approved" for inv in referrer_investments.values())
             
-            # Check if referrer has at least one approved investment
-            has_approved_investment = any(
-                inv.get("status") == "approved" 
-                for inv in referrer_investments.values()
-            )
-            
-            if has_approved_investment:
+            if has_approved:
                 referral_bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
                 referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0.0) + referral_bonus
                 referrer.balance = (referrer.balance or 0.0) + referral_bonus
