@@ -21,15 +21,16 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 ADMIN_PASSWORD = "PHIL4857"
 REFERRAL_BONUS_PERCENT = 10
 
+# Daily bonus = 10% of investment price
 COMMODITY_INFO = {
-    "marble": {"price": 650, "expiry_days": 15},
-    "crude_oil": {"price": 800, "expiry_days": 20},
-    "silver": {"price": 1000, "expiry_days": 23},
-    "lead": {"price": 1200, "expiry_days": 25},
-    "platinum": {"price": 1350, "expiry_days": 28},
-    "diamonds": {"price": 1750, "expiry_days": 32},
-    "gold": {"price": 2200, "expiry_days": 35},
-    "uranium": {"price": 3000, "expiry_days": 45},
+    "marble": {"price": 650, "daily_bonus": 65, "expiry_days": 15},
+    "crude_oil": {"price": 800, "daily_bonus": 80, "expiry_days": 20},
+    "silver": {"price": 1000, "daily_bonus": 100, "expiry_days": 23},
+    "lead": {"price": 1200, "daily_bonus": 120, "expiry_days": 25},
+    "platinum": {"price": 1350, "daily_bonus": 135, "expiry_days": 28},
+    "diamonds": {"price": 1750, "daily_bonus": 175, "expiry_days": 32},
+    "gold": {"price": 2200, "daily_bonus": 220, "expiry_days": 35},
+    "uranium": {"price": 3000, "daily_bonus": 300, "expiry_days": 45},
 }
 
 MPESA_NUMBER = "0752964507"
@@ -141,7 +142,7 @@ class AdminAction(BaseModel):
     withdrawal_id: Optional[int] = None
     investment_commodity: Optional[str] = None
 
-# ---------------- ADMIN ROUTES (unchanged except approve-investment) ----------------
+# ---------------- ADMIN ROUTES ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -227,7 +228,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN (Fixed Referral + Immediate Grab) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -249,15 +250,14 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     
     amount = investment.get("amount", 0)
     
-    # Approve investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
-    investment["last_credited"] = (datetime.utcnow() - timedelta(days=1)).isoformat()  # Allow immediate first grab
+    investment["last_credited"] = (datetime.utcnow() - timedelta(days=1)).isoformat()
 
     flag_modified(user, "investments")
 
-    # === Referral Bonus: 10% of investment amount ===
+    # Referral Bonus = 10% of investment
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -270,7 +270,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     db.refresh(user)
     
     return {
-        "message": f"Investment in {data.investment_commodity} for {data.username} approved. First daily bonus ready to grab. Referral bonus added if applicable."
+        "message": f"Investment in {data.investment_commodity} approved successfully. First daily bonus ready to grab!"
     }
 
 @app.post("/admin/pending-investments")
@@ -280,7 +280,6 @@ def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db
     
     users = db.query(UserDB).all()
     pending = []
-    
     for user in users:
         investments = user.investments or {}
         for commodity, inv in investments.items():
@@ -291,7 +290,6 @@ def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db
                     "amount": inv.get("amount", 0),
                     "requested_at": inv.get("requested_at", "N/A")
                 })
-    
     return pending
 
 # ==================== INVESTMENT REQUEST ====================
@@ -353,9 +351,8 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
         minutes = int((seconds_left % 3600) // 60)
         raise HTTPException(status_code=400, detail=f"Next bonus available in {hours}h {minutes}m")
 
-    days_total = COMMODITY_INFO[commodity]["expiry_days"]
-    daily_rate = inv["amount"] / days_total
-    earned = daily_rate
+    daily_bonus = COMMODITY_INFO[commodity]["daily_bonus"]
+    earned = daily_bonus
 
     current_user.balance += earned
     current_user.earnings += earned
@@ -368,8 +365,8 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
 
     return {
         "success": True,
-        "message": f"Successfully grabbed KES {round(earned, 2)} daily bonus for {commodity}!",
-        "earned": round(earned, 2),
+        "message": f"Successfully grabbed KES {earned} daily bonus for {commodity}!",
+        "earned": earned,
         "new_balance": round(current_user.balance, 2)
     }
 
@@ -444,9 +441,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 expiry = now + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
                 last = now - timedelta(days=2)
 
-            days_total = COMMODITY_INFO[commodity]["expiry_days"]
-            daily_rate = amount / days_total
-
+            daily_bonus = COMMODITY_INFO[commodity]["daily_bonus"]
             can_grab = (now - last).total_seconds() >= 86400
 
             seconds_since_last = (now - last).total_seconds()
@@ -461,11 +456,11 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 "status": "approved",
                 "emoji": "✅",
                 "days_remaining": days_remaining,
-                "daily_earning": round(daily_rate, 2),
+                "daily_earning": daily_bonus,
                 "can_grab": can_grab,
                 "time_to_next": f"{hours_to_next}h {minutes_to_next}m" if not can_grab else "Ready to grab now!"
             }
-            daily_earnings_total += daily_rate
+            daily_earnings_total += daily_bonus
 
         elif status == "pending":
             inv_status[commodity] = {
