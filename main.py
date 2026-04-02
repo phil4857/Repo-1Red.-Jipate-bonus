@@ -271,8 +271,11 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            # Check if referrer has at least one approved investment
+            # Refresh referrer to get latest investments
+            db.refresh(referrer)
             referrer_investments = referrer.investments or {}
+            
+            # Check if referrer has at least one approved investment
             has_approved_investment = any(
                 inv.get("status") == "approved" 
                 for inv in referrer_investments.values()
