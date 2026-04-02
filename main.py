@@ -70,7 +70,7 @@ class WithdrawalRequest(Base):
     __tablename__ = "withdrawals"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer)
-    amount = Column(Float)           # Amount requested by user
+    amount = Column(Float)
     charge = Column(Float, default=0.0)
     net_amount = Column(Float, default=0.0)
     payment_method = Column(String, default="mpesa")
@@ -139,7 +139,7 @@ class GrabBonusRequest(BaseModel):
 
 class WithdrawRequest(BaseModel):
     amount: float
-    payment_method: str = "mpesa"   # mpesa, bank, paypal
+    payment_method: str = "mpesa"
 
 class AdminAction(BaseModel):
     password: str
@@ -236,7 +236,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Strict Referral Rules) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -256,8 +256,9 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
-    amount = investment.get("amount", 0)
+    amount = investment.get("amount", 0.0)
     
+    # Approve the investment
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
@@ -265,20 +266,33 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
 
     flag_modified(user, "investments")
 
-    # Referral Bonus = 10%
+    # === STRICT REFERRAL BONUS RULES ===
+    referral_bonus = 0.0
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
-            bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
-            referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0) + bonus
-            referrer.balance = (referrer.balance or 0) + bonus
-            db.add(referrer)
+            # Rule: Referrer must have at least one approved investment
+            referrer_investments = referrer.investments or {}
+            has_approved_investment = any(
+                inv.get("status") == "approved" 
+                for inv in referrer_investments.values()
+            )
+            
+            if has_approved_investment:
+                referral_bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
+                referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0.0) + referral_bonus
+                referrer.balance = (referrer.balance or 0.0) + referral_bonus
+                db.add(referrer)
+            # Else: No bonus - referrer has not invested/approved yet
 
     db.commit()
     db.refresh(user)
     
     return {
-        "message": f"Investment in {data.investment_commodity} approved successfully. First daily bonus ready to grab!"
+        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. "
+                   f"First daily bonus is ready. "
+                   f"Referral bonus: KES {referral_bonus:.2f} "
+                   f"{'added to referrer' if referral_bonus > 0 else '(referrer must have an approved investment first)'}"
     }
 
 @app.post("/admin/pending-investments")
@@ -378,7 +392,7 @@ def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_curren
         "new_balance": round(current_user.balance, 2)
     }
 
-# ---------------- WITHDRAW REQUEST (with 20% charge + multiple methods) ----------------
+# ---------------- WITHDRAW REQUEST ----------------
 @app.post("/withdraw/request")
 def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.amount <= 0:
@@ -390,7 +404,6 @@ def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get
     if current_user.balance < data.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
-    # Validate payment method
     valid_methods = ["mpesa", "bank", "paypal"]
     if data.payment_method.lower() not in valid_methods:
         raise HTTPException(status_code=400, detail="Invalid payment method. Choose: mpesa, bank, or paypal")
