@@ -9,6 +9,7 @@ from pydantic import BaseModel, constr, validator
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.ext.mutable import MutableDict
+from sqlalchemy.orm.attributes import flag_modified   # <-- Added for JSON mutation fix
 import bcrypt
 import jwt
 
@@ -137,7 +138,7 @@ class AdminAction(BaseModel):
     withdrawal_id: Optional[int] = None
     investment_commodity: Optional[str] = None
 
-# ---------------- ADMIN ROUTES ----------------
+# ---------------- ADMIN ROUTES (unchanged) ----------------
 @app.post("/admin/login")
 def admin_login(data: UserLogin = Body(...)):
     if data.username != "admin" or data.password != ADMIN_PASSWORD:
@@ -169,7 +170,6 @@ def reset_password(data: AdminAction = Body(...), db: Session = Depends(get_db))
     if not user:
         raise HTTPException(status_code=404, detail=f"User '{data.username}' not found")
     user.password_hash = hash_pwd("123456")
-    db.add(user)
     db.commit()
     return {"message": f"Password for {data.username} reset to '123456'"}
 
@@ -209,30 +209,22 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
         raise HTTPException(status_code=401, detail="Invalid admin password")
     if not data.withdrawal_id:
         raise HTTPException(status_code=400, detail="withdrawal_id is required")
-
     withdrawal = db.query(WithdrawalRequest).filter_by(id=data.withdrawal_id).first()
     if not withdrawal:
         raise HTTPException(status_code=404, detail="Withdrawal request not found")
-
     if withdrawal.status != "pending":
         raise HTTPException(status_code=400, detail="Withdrawal already processed")
-
     withdrawal.status = "approved"
     withdrawal.approved_at = datetime.utcnow()
-
     user = db.query(UserDB).filter_by(id=withdrawal.user_id).first()
-
     if user and user.balance >= withdrawal.amount:
         user.balance -= withdrawal.amount
     else:
         raise HTTPException(status_code=400, detail="Insufficient balance or user not found")
-
-    db.add(user)
-    db.add(withdrawal)
     db.commit()
-
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
+# ---------------- INVESTMENT APPROVAL BY ADMIN ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -252,16 +244,16 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
-    # ✅ Update investment status
+    # === FIXED: Force mutation detection ===
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
     investment["last_credited"] = datetime.utcnow().isoformat()
 
-    # ✅ Re-assign the investments dict to trigger SQLAlchemy change detection
-    user.investments = dict(investments)
+    # Critical fix for MutableDict/JSON
+    flag_modified(user, "investments")
 
-    # ✅ Handle referral bonus
+    # Referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -277,7 +269,28 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
         "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."
     }
 
-# ==================== INVESTMENT REQUEST ====================
+@app.post("/admin/pending-investments")
+def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db)):
+    if data.get("password") != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid admin password")
+    
+    users = db.query(UserDB).all()
+    pending = []
+    
+    for user in users:
+        investments = user.investments or {}
+        for commodity, inv in investments.items():
+            if inv.get("status") == "pending":
+                pending.append({
+                    "username": user.username,
+                    "commodity": commodity,
+                    "amount": inv.get("amount", 0),
+                    "requested_at": inv.get("requested_at", "N/A")
+                })
+    
+    return pending
+
+# ==================== FIXED INVESTMENT REQUEST ====================
 @app.post("/invest/request")
 def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.commodity not in COMMODITY_INFO:
@@ -285,8 +298,9 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
 
     price = COMMODITY_INFO[data.commodity]["price"]
 
-    investments = dict(current_user.investments or {})
+    investments = current_user.investments or {}
 
+    # Prevent duplicate pending investment for same commodity
     if data.commodity in investments and investments[data.commodity].get("status") == "pending":
         raise HTTPException(status_code=400, detail="You already have a pending request for this commodity")
 
@@ -298,8 +312,7 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
     }
 
     current_user.investments = investments
-
-    db.add(current_user)
+    flag_modified(current_user, "investments")   # <-- Added for safety
     db.commit()
     db.refresh(current_user)
 
@@ -317,7 +330,6 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
 def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid withdrawal amount")
-
     if current_user.balance < data.amount:
         raise HTTPException(status_code=400, detail="Insufficient balance")
 
@@ -325,13 +337,12 @@ def request_withdrawal(data: WithdrawRequest, current_user: UserDB = Depends(get
         user_id=current_user.id,
         amount=data.amount
     )
-
     db.add(withdrawal)
     db.commit()
 
     return {"message": "Withdrawal request submitted. Waiting for admin approval."}
 
-# ---------------- AUTH ROUTES ----------------
+# ---------------- AUTH ROUTES (unchanged) ----------------
 @app.post("/register")
 def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
     if db.query(UserDB).filter_by(username=data.username).first():
@@ -344,7 +355,6 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
         referral_code=data.referral.lower() if data.referral else None,
         approved=True
     )
-
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -357,18 +367,15 @@ def register(data: UserCreate = Body(...), db: Session = Depends(get_db)):
 @app.post("/login")
 def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     user = db.query(UserDB).filter_by(username=data.username.lower()).first()
-
     if not user or not check_pwd(data.password, user.password_hash):
         raise HTTPException(status_code=400, detail="Invalid username or password")
 
     token = create_token({"sub": user.username})
-
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD ----------------
+# ---------------- DASHBOARD (with small safe fix) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
-
     user = current_user
     now = datetime.utcnow()
     daily_earnings = 0
@@ -400,6 +407,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 user.balance += earned
                 user.earnings += earned
                 inv["last_credited"] = now.isoformat()
+                flag_modified(user, "investments")   # <-- Safe fix for daily earnings
 
             seconds_since_last = (now - last).total_seconds()
             seconds_to_next = 86400 - (seconds_since_last % 86400)
@@ -414,20 +422,15 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 "daily_earning": daily_rate,
                 "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next earning"
             }
-
             daily_earnings += daily_rate
-
         elif status == "pending":
-
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "pending",
                 "emoji": "🕒",
                 "payment_instruction": inv.get("payment_method", f"Pay via M-Pesa to {MPESA_NUMBER}")
             }
-
         else:
-
             inv_status[commodity] = {
                 "amount": amount,
                 "status": "not_invested",
