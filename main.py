@@ -236,7 +236,7 @@ def approve_withdrawal(data: AdminAction = Body(...), db: Session = Depends(get_
     db.commit()
     return {"message": f"Withdrawal #{data.withdrawal_id} approved successfully"}
 
-# ---------------- INVESTMENT APPROVAL BY ADMIN (Fixed Referral Bonus) ----------------
+# ---------------- INVESTMENT APPROVAL BY ADMIN (Strict Referral Rules) ----------------
 @app.post("/admin/approve-investment")
 def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_db)):
     if data.password != ADMIN_PASSWORD:
@@ -282,7 +282,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
                 referral_bonus = amount * (REFERRAL_BONUS_PERCENT / 100)
                 referrer.referral_bonus_earned = (referrer.referral_bonus_earned or 0.0) + referral_bonus
                 referrer.balance = (referrer.balance or 0.0) + referral_bonus
-                db.add(referrer)   # Ensure referrer is tracked
+                db.add(referrer)
 
     db.commit()
     db.refresh(user)
