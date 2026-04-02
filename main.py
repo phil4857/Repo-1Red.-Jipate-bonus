@@ -9,7 +9,7 @@ from pydantic import BaseModel, constr, validator
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.ext.mutable import MutableDict
-from sqlalchemy.orm.attributes import flag_modified   # Added for reliable JSON updates
+from sqlalchemy.orm.attributes import flag_modified
 import bcrypt
 import jwt
 
@@ -132,6 +132,9 @@ class InvestRequest(BaseModel):
 class WithdrawRequest(BaseModel):
     amount: float
 
+class GrabBonusRequest(BaseModel):
+    commodity: str
+
 class AdminAction(BaseModel):
     password: str
     username: Optional[str] = None
@@ -244,15 +247,13 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     if investment.get("status") != "pending":
         raise HTTPException(status_code=400, detail="Investment already processed")
     
-    # === FIXED: Force mutation detection ===
     investment["status"] = "approved"
     investment["start_date"] = datetime.utcnow().isoformat()
     investment["expiry_date"] = (datetime.utcnow() + timedelta(days=COMMODITY_INFO[data.investment_commodity]["expiry_days"])).isoformat()
-    investment["last_credited"] = datetime.utcnow().isoformat()
+    investment["last_credited"] = datetime.utcnow().isoformat()   # Allow immediate grab
 
     flag_modified(user, "investments")
 
-    # Referral bonus
     if user.referral_code:
         referrer = db.query(UserDB).filter_by(username=user.referral_code).first()
         if referrer:
@@ -265,7 +266,7 @@ def approve_investment(data: AdminAction = Body(...), db: Session = Depends(get_
     db.refresh(user)
     
     return {
-        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. Earnings will start now."
+        "message": f"Investment in {data.investment_commodity} for {data.username} approved successfully. User can now grab daily bonus."
     }
 
 @app.post("/admin/pending-investments")
@@ -289,7 +290,7 @@ def get_pending_investments(data: dict = Body(...), db: Session = Depends(get_db
     
     return pending
 
-# ==================== FIXED INVESTMENT REQUEST ====================
+# ==================== INVESTMENT REQUEST ====================
 @app.post("/invest/request")
 def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     if data.commodity not in COMMODITY_INFO:
@@ -299,7 +300,6 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
 
     investments = current_user.investments or {}
 
-    # Prevent duplicate pending investment for same commodity
     if data.commodity in investments and investments[data.commodity].get("status") == "pending":
         raise HTTPException(status_code=400, detail="You already have a pending request for this commodity")
 
@@ -322,6 +322,53 @@ def invest_request(data: InvestRequest, current_user: UserDB = Depends(get_curre
         "price": price,
         "payment_instruction": f"Pay KES {price} via M-Pesa to {MPESA_NUMBER}",
         "status": "pending"
+    }
+
+# ---------------- NEW: Grab Daily Bonus Route ----------------
+@app.post("/bonus/grab")
+def grab_bonus(data: GrabBonusRequest, current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
+    commodity = data.commodity
+    if commodity not in COMMODITY_INFO:
+        raise HTTPException(status_code=400, detail="Invalid commodity")
+
+    investments = current_user.investments or {}
+    inv = investments.get(commodity, {})
+
+    if inv.get("status") != "approved":
+        raise HTTPException(status_code=400, detail="Investment not approved yet")
+
+    now = datetime.utcnow()
+    try:
+        last_credited = datetime.fromisoformat(inv.get("last_credited", now.isoformat()))
+    except:
+        last_credited = now - timedelta(days=1)  # Allow first grab
+
+    # Check if 24 hours have passed since last grab
+    if (now - last_credited).total_seconds() < 86400:
+        seconds_left = 86400 - (now - last_credited).total_seconds()
+        hours = int(seconds_left // 3600)
+        minutes = int((seconds_left % 3600) // 60)
+        raise HTTPException(status_code=400, detail=f"Next bonus available in {hours}h {minutes}m")
+
+    # Calculate and credit daily bonus
+    days_total = COMMODITY_INFO[commodity]["expiry_days"]
+    daily_rate = inv["amount"] / days_total
+    earned = daily_rate
+
+    current_user.balance += earned
+    current_user.earnings += earned
+
+    inv["last_credited"] = now.isoformat()
+    flag_modified(current_user, "investments")
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "success": True,
+        "message": f"Successfully grabbed KES {round(earned, 2)} daily bonus for {commodity}!",
+        "earned": round(earned, 2),
+        "new_balance": round(current_user.balance, 2)
     }
 
 # ---------------- WITHDRAW REQUEST ----------------
@@ -372,12 +419,12 @@ def login(data: UserLogin = Body(...), db: Session = Depends(get_db)):
     token = create_token({"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---------------- DASHBOARD (FIXED - Now shows daily earnings, countdown & days left) ----------------
+# ---------------- DASHBOARD (Shows Grab Button + Live Countdown) ----------------
 @app.get("/dashboard")
 def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = Depends(get_db)):
     user = current_user
     now = datetime.utcnow()
-    daily_earnings = 0.0
+    daily_earnings_total = 0.0
     inv_status = {}
 
     investments = user.investments or {}
@@ -395,25 +442,16 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
             except Exception:
                 start = now
                 expiry = start + timedelta(days=COMMODITY_INFO[commodity]["expiry_days"])
-                last = start
+                last = start - timedelta(days=1)  # Allow immediate first grab
 
             days_total = COMMODITY_INFO[commodity]["expiry_days"]
             daily_rate = amount / days_total
 
-            # Credit missed daily earnings
-            days_to_credit = max((now - last).days, 0)
-            if days_to_credit > 0:
-                earned = daily_rate * days_to_credit
-                user.balance += earned
-                user.earnings += earned
-                inv["last_credited"] = now.isoformat()
+            # Check if bonus is ready to grab
+            can_grab = (now - last).total_seconds() >= 86400
 
-            # Force save for JSON field
-            flag_modified(user, "investments")
-
-            # Live countdown to next earning
             seconds_since_last = (now - last).total_seconds()
-            seconds_to_next = 86400 - (seconds_since_last % 86400)
+            seconds_to_next = max(0, 86400 - (seconds_since_last % 86400))
             hours_to_next = int(seconds_to_next // 3600)
             minutes_to_next = int((seconds_to_next % 3600) // 60)
 
@@ -425,10 +463,11 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
                 "emoji": "✅",
                 "days_remaining": days_remaining,
                 "daily_earning": round(daily_rate, 2),
-                "time_to_next_earning": f"{hours_to_next}h {minutes_to_next}m until next daily bonus",
-                "next_bonus_in": f"{hours_to_next}h {minutes_to_next}m"
+                "can_grab": can_grab,
+                "time_to_next": f"{hours_to_next}h {minutes_to_next}m" if not can_grab else "Ready now!",
+                "action": "grab_bonus" if can_grab else "wait"
             }
-            daily_earnings += daily_rate
+            daily_earnings_total += daily_rate
 
         elif status == "pending":
             inv_status[commodity] = {
@@ -455,7 +494,7 @@ def dashboard(current_user: UserDB = Depends(get_current_user), db: Session = De
         "balance": round(user.balance, 2),
         "earnings": round(user.earnings, 2),
         "investments": inv_status,
-        "daily_earnings_total": round(daily_earnings, 2),
+        "daily_earnings_total": round(daily_earnings_total, 2),
         "approved": user.approved,
         "referral_link": f"https://jipate-bonus-v1.vercel.app/register.html?ref={user.username}",
         "referral_bonus_earned": round(referral_bonus, 2)
