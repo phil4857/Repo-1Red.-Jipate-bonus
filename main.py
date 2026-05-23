@@ -25,14 +25,83 @@ WITHDRAWAL_CHARGE_PERCENT = 20
 
 # ✅ ALIGNED WITH FRONTEND: exact keys & prices from dashboard.html COMMODITY_INFO
 COMMODITY_INFO = {
-    "data_pack":      {"price": 1000, "daily_bonus": 100, "expiry_days": 20},
-    "creator":        {"price": 1400, "daily_bonus": 140, "expiry_days": 23},
-    "affiliate":      {"price": 1800, "daily_bonus": 180, "expiry_days": 25},
-    "influencer":     {"price": 2200, "daily_bonus": 220, "expiry_days": 28},
-    "digital_pro":    {"price": 2600, "daily_bonus": 260, "expiry_days": 30},
-    "growth_hub":     {"price": 3000, "daily_bonus": 300, "expiry_days": 35},
-    "wealth_builder": {"price": 3500, "daily_bonus": 350, "expiry_days": 40},
-    "empire":         {"price": 4000, "daily_bonus": 400, "expiry_days": 45},
+    "spark": {
+        "price": 450,
+        "daily_bonus": 40,
+        "expiry_days": 18
+    },
+
+    "boost": {
+        "price": 550,
+        "daily_bonus": 50,
+        "expiry_days": 20
+    },
+
+    "connect": {
+        "price": 650,
+        "daily_bonus": 60,
+        "expiry_days": 22
+    },
+
+    "stream": {
+        "price": 750,
+        "daily_bonus": 70,
+        "expiry_days": 24
+    },
+
+    "launch": {
+        "price": 900,
+        "daily_bonus": 85,
+        "expiry_days": 26
+    },
+
+    "data_pack": {
+        "price": 1000,
+        "daily_bonus": 100,
+        "expiry_days": 20
+    },
+
+    "creator": {
+        "price": 1400,
+        "daily_bonus": 140,
+        "expiry_days": 23
+    },
+
+    "affiliate": {
+        "price": 1800,
+        "daily_bonus": 180,
+        "expiry_days": 25
+    },
+
+    "influencer": {
+        "price": 2200,
+        "daily_bonus": 220,
+        "expiry_days": 28
+    },
+
+    "digital_pro": {
+        "price": 2600,
+        "daily_bonus": 260,
+        "expiry_days": 30
+    },
+
+    "growth_hub": {
+        "price": 3000,
+        "daily_bonus": 300,
+        "expiry_days": 35
+    },
+
+    "wealth_builder": {
+        "price": 3500,
+        "daily_bonus": 350,
+        "expiry_days": 40
+    },
+
+    "empire": {
+        "price": 4000,
+        "daily_bonus": 400,
+        "expiry_days": 45
+    },
 }
 
 # ✅ ALIGNED WITH FRONTEND: referral link base URL
