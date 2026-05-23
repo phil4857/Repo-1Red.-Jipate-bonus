@@ -105,7 +105,7 @@ COMMODITY_INFO = {
 }
 
 # ✅ ALIGNED WITH FRONTEND: referral link base URL
-FRONTEND_URL = "https://mula-hyum72b8o-voting-219fda77.vercel.app"
+FRONTEND_URL = "https://mula-hub.vercel.app/"
 MPESA_NUMBER = "0752964507"
 
 # ---------------- APP ----------------
